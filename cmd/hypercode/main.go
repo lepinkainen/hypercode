@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"hypercode/internal/adapter"
-	"hypercode/internal/adapter/codex"
-	"hypercode/internal/session"
-	"hypercode/internal/store"
-	"hypercode/internal/web"
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/adapter/codex"
+	"github.com/lepinkainen/hypercode/internal/session"
+	"github.com/lepinkainen/hypercode/internal/store"
+	"github.com/lepinkainen/hypercode/internal/web"
 )
 
 func main() {

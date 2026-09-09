@@ -1,4 +1,4 @@
-module hypercode
+module github.com/lepinkainen/hypercode
 
 go 1.26.0
 

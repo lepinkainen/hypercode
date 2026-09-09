@@ -2,7 +2,7 @@
 package main
 
 import (
-	"hypercode/internal/testcodex"
+	"github.com/lepinkainen/hypercode/internal/testcodex"
 	"log"
 	"os"
 )

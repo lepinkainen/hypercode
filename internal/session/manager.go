@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"hypercode/internal/adapter"
-	"hypercode/internal/limits"
-	"hypercode/internal/store"
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/limits"
+	"github.com/lepinkainen/hypercode/internal/store"
 )
 
 const ReplayLimit = 256

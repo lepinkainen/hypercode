@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"hypercode/internal/adapter"
-	"hypercode/internal/session"
-	"hypercode/internal/store"
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/session"
+	"github.com/lepinkainen/hypercode/internal/store"
 )
 
 func testServer(t *testing.T) (*Server, *session.Manager) {

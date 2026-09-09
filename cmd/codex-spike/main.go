@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/signal"
 
-	"hypercode/internal/adapter"
-	"hypercode/internal/adapter/codex"
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/adapter/codex"
 )
 
 func main() {

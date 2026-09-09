@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/adapter"
 )
 
 type Adapter struct {

@@ -15,12 +15,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/limits"
+	"github.com/lepinkainen/hypercode/internal/session"
+	"github.com/lepinkainen/hypercode/internal/store"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
-	"hypercode/internal/adapter"
-	"hypercode/internal/limits"
-	"hypercode/internal/session"
-	"hypercode/internal/store"
 )
 
 //go:embed templates/*.html assets/*

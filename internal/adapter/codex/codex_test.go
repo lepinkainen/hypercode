@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"hypercode/internal/adapter"
-	"hypercode/internal/testcodex"
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/testcodex"
 )
 
 func TestProtocolProcess(t *testing.T) {

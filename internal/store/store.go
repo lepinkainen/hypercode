@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/adapter"
 	_ "modernc.org/sqlite"
 )
 

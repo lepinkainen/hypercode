@@ -10,8 +10,8 @@ import (
 
 	"testing"
 
-	"hypercode/internal/adapter"
-	"hypercode/internal/store"
+	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/store"
 )
 
 type fakeAdapter struct {

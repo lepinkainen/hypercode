@@ -1,7 +1,7 @@
 package store
 
 import (
-	"hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/adapter"
 	"path/filepath"
 	"testing"
 	"time"
