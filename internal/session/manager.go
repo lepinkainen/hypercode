@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hypercode/internal/adapter"
+	"hypercode/internal/limits"
 	"hypercode/internal/store"
 )
 
@@ -32,11 +33,13 @@ type runtime struct {
 }
 type Manager struct {
 	mu          sync.Mutex
-	db          *store.Store
+	persistMu   sync.Mutex
+	db          historyStore
 	adapters    map[string]adapter.Adapter
 	chats       map[string]*store.Chat
 	runtimes    map[string]*runtime
 	dirty       map[string]bool
+	dirtyItems  map[string]map[string]store.Item
 	generation  string
 	seq         uint64
 	ring        []Update
@@ -47,13 +50,18 @@ type Manager struct {
 	closed      bool
 }
 
-func New(db *store.Store, adapters map[string]adapter.Adapter) (*Manager, error) {
+type historyStore interface {
+	Load() ([]store.Chat, error)
+	Save(store.Chat) error
+}
+
+func New(db historyStore, adapters map[string]adapter.Adapter) (*Manager, error) {
 	chats, err := db.Load()
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &Manager{db: db, adapters: adapters, chats: map[string]*store.Chat{}, runtimes: map[string]*runtime{}, dirty: map[string]bool{}, generation: store.ID(), subscribers: map[chan struct{}]bool{}, ctx: ctx, cancel: cancel}
+	m := &Manager{db: db, adapters: adapters, chats: map[string]*store.Chat{}, runtimes: map[string]*runtime{}, dirty: map[string]bool{}, dirtyItems: map[string]map[string]store.Item{}, generation: store.ID(), subscribers: map[chan struct{}]bool{}, ctx: ctx, cancel: cancel}
 	for i := range chats {
 		m.chats[chats[i].ID] = &chats[i]
 	}
@@ -71,7 +79,14 @@ func (m *Manager) flushLoop() {
 			return
 		case <-t.C:
 			m.mu.Lock()
+			ids := make([]string, 0, len(m.dirty))
 			for id := range m.dirty {
+				ids = append(ids, id)
+			}
+			for _, id := range ids {
+				if m.chats[id] == nil {
+					continue
+				}
 				if err := m.save(m.chats[id]); err != nil {
 					slog.Error("persist partial output", "error", err)
 				}
@@ -81,18 +96,51 @@ func (m *Manager) flushLoop() {
 	}
 }
 func (m *Manager) save(c *store.Chat) error {
-	if err := m.db.Save(*c); err != nil {
-		return err
+	// Enter and return with mu held. Serialize snapshots and writes together so
+	// an older snapshot cannot overwrite a newer save, while reads remain free.
+	m.mu.Unlock()
+	m.persistMu.Lock()
+	m.mu.Lock()
+	snapshot := *c
+	pending := m.dirtyItems[c.ID]
+	snapshot.Items = make([]store.Item, 0, len(pending))
+	for _, item := range pending {
+		snapshot.Items = append(snapshot.Items, item)
 	}
+	delete(m.dirtyItems, c.ID)
 	delete(m.dirty, c.ID)
-	return nil
+	db := m.db
+	m.mu.Unlock()
+	err := db.Save(snapshot)
+	m.mu.Lock()
+	if err != nil {
+		// Preserve changes that arrived during the failed write. Retry only the
+		// newest version of each item, plus metadata, on the next flush.
+		if m.dirtyItems[c.ID] == nil {
+			m.dirtyItems[c.ID] = pending
+		} else {
+			for id, item := range pending {
+				if _, newer := m.dirtyItems[c.ID][id]; !newer {
+					m.dirtyItems[c.ID][id] = item
+				}
+			}
+		}
+		m.dirty[c.ID] = true
+	}
+	m.persistMu.Unlock()
+	return err
 }
 func (m *Manager) publish(c *store.Chat, item *store.Item) {
+	m.dirty[c.ID] = true
 	m.seq++
 	u := Update{Seq: m.seq, ChatID: c.ID}
 	if item != nil {
 		copy := *item
 		u.Item = &copy
+		if m.dirtyItems[c.ID] == nil {
+			m.dirtyItems[c.ID] = map[string]store.Item{}
+		}
+		m.dirtyItems[c.ID][item.ID] = copy
 	}
 	m.ring = append(m.ring, u)
 	if len(m.ring) > ReplayLimit {
@@ -113,7 +161,7 @@ func clone(c *store.Chat) store.Chat {
 func (m *Manager) listLocked() []store.Chat {
 	out := make([]store.Chat, 0, len(m.chats))
 	for _, c := range m.chats {
-		v := clone(c)
+		v := *c
 		v.Items = nil
 		out = append(out, v)
 	}
@@ -163,6 +211,14 @@ func (m *Manager) Create(ctx context.Context, harness, dir string, mode adapter.
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return "", errors.New("application is shutting down")
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	defer m.wg.Done()
 	a := m.adapters[harness]
 	if a == nil {
 		return "", errors.New("unsupported agent")
@@ -197,8 +253,14 @@ func (m *Manager) Create(ctx context.Context, harness, dir string, mode adapter.
 		return "", errors.New("application is shutting down")
 	}
 	if err = m.save(c); err != nil {
+		delete(m.dirty, c.ID)
+		delete(m.dirtyItems, c.ID)
 		_ = native.Close()
 		return "", err
+	}
+	if m.closed {
+		_ = native.Close()
+		return "", errors.New("application is shutting down")
 	}
 	m.chats[c.ID] = c
 	m.attach(c, native)
@@ -232,7 +294,7 @@ func (m *Manager) Send(ctx context.Context, id, text string) error {
 	if text == "" {
 		return errors.New("write a message first")
 	}
-	if len(text) > 100000 {
+	if !limits.MessageFits(text) {
 		return errors.New("message is too long")
 	}
 	rt, err := m.getRuntime(id)
@@ -261,19 +323,41 @@ func (m *Manager) Send(ctx context.Context, id, text string) error {
 		c.Title = string(r)
 	}
 	item := m.newItem(c, "user", "done", text)
+	itemID := item.ID
+	m.publish(c, item)
 	if err = m.save(c); err != nil {
 		c.Status = "error"
 		m.publish(c, nil)
 		m.mu.Unlock()
 		return err
 	}
-	m.publish(c, item)
 	m.mu.Unlock()
 	// Once accepted, work belongs to the application even if the POST disconnects.
 	if err = rt.native.Send(m.ctx, text); err != nil {
-		m.fail(id, rt, err.Error())
-		_ = rt.native.Close()
-		return err
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.runtimes[id] != rt {
+			return err
+		}
+		var rejected *adapter.RejectedError
+		message := "Could not confirm whether Codex accepted the message: " + err.Error()
+		if errors.As(err, &rejected) {
+			if c.Status == "running" {
+				c.Status = "idle"
+			}
+			for n := range c.Items {
+				if c.Items[n].ID == itemID {
+					c.Items[n].Status = "rejected"
+					m.publish(c, &c.Items[n])
+					break
+				}
+			}
+			message = "Codex rejected the message. You can edit it and retry: " + err.Error()
+		}
+		// A timeout is not proof of process loss or rejection. Keep the current
+		// state until events report completion or the event stream closes.
+		m.publish(c, m.newItem(c, "notice", "done", message))
+		return errors.Join(err, m.save(c))
 	}
 	return nil
 }
@@ -319,6 +403,8 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 		m.mu.Unlock()
 		return errors.New("resume already in progress")
 	}
+	m.wg.Add(1)
+	defer m.wg.Done()
 	c.Status = "running"
 	m.publish(c, nil)
 	copy := clone(c)
@@ -329,7 +415,14 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	}
 	var native adapter.Session
 	var err error
-	if len(copy.Items) == 0 {
+	hasConversation := false
+	for _, item := range copy.Items {
+		if item.Kind != "error" && item.Kind != "notice" && item.Status != "rejected" {
+			hasConversation = true
+			break
+		}
+	}
+	if !hasConversation {
 		native, err = a.Open(m.ctx, copy.Directory, copy.Mode)
 	} else {
 		native, err = a.Resume(m.ctx, copy.Directory, copy.NativeRef, copy.Mode)
@@ -339,7 +432,7 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	c = m.chats[id]
 	if err != nil {
 		c.Status = "error"
-		m.newItem(c, "error", "done", err.Error())
+		m.publish(c, m.newItem(c, "error", "done", err.Error()))
 		saveErr := m.save(c)
 		m.publish(c, nil)
 		return errors.Join(err, saveErr)
@@ -349,13 +442,18 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 		return errors.New("application is shutting down")
 	}
 	c.NativeRef = native.Ref()
-	c.Status = "idle"
+	// Keep the cold-resume reservation while persistence releases mu.
 	if err = m.save(c); err != nil {
 		_ = native.Close()
 		c.Status = "error"
 		m.publish(c, nil)
 		return err
 	}
+	if m.closed {
+		_ = native.Close()
+		return errors.New("application is shutting down")
+	}
+	c.Status = "idle"
 	m.attach(c, native)
 	m.publish(c, nil)
 	return nil

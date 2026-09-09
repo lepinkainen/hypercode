@@ -62,6 +62,10 @@ func Run(in io.Reader, out io.Writer) error {
 			if len(args.Input) > 0 {
 				text = args.Input[0].Text
 			}
+			if strings.Contains(text, "[reject]") {
+				write(map[string]any{"id": p.ID, "error": map[string]any{"code": -32602, "message": "Fixture request rejected"}})
+				continue
+			}
 			turn++
 			item = fmt.Sprintf("message-%d", turn)
 			event("turn/started", map[string]any{"threadId": ref, "turn": map[string]string{"id": fmt.Sprint(turn), "status": "inProgress"}})

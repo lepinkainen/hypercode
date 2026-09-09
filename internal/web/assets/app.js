@@ -188,6 +188,14 @@
       document.querySelector(".new-chat")?.click();
     }
   });
-  window.addEventListener("pagehide", () => source?.close());
+  window.addEventListener("pagehide", () => {
+    source?.close();
+    source = null;
+    activeRoot = null;
+    pending.clear();
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) connect();
+  });
   document.addEventListener("DOMContentLoaded", connect);
 })();

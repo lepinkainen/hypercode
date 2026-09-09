@@ -66,6 +66,9 @@ func Open(path string) (*Store, error) {
 	return &Store{db}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
+
+// Save upserts session metadata and the supplied items. Items omitted from c
+// remain unchanged, so callers can persist only the items changed since a save.
 func (s *Store) Save(c Chat) error {
 	tx, err := s.db.Begin()
 	if err != nil {

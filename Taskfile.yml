@@ -24,6 +24,7 @@ tasks:
   test:
     cmds:
       - go test -race ./...
+      - node --test internal/web/browser_test.cjs
   lint:
     cmds:
       - go run ./internal/checkformat

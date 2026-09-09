@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
+
 	"testing"
 
 	"hypercode/internal/adapter"
@@ -15,6 +18,7 @@ type fakeAdapter struct {
 	mu      sync.Mutex
 	last    *fakeSession
 	resumed string
+	openErr error
 }
 type fakeSession struct {
 	events    chan adapter.Event
@@ -26,6 +30,9 @@ type fakeSession struct {
 func (f *fakeAdapter) Open(context.Context, string, adapter.PermissionMode) (adapter.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
 	s := &fakeSession{events: make(chan adapter.Event, 1024)}
 	f.last = s
 	return s, nil
@@ -250,4 +257,233 @@ func TestResolvedRequestBecomesInterrupted(t *testing.T) {
 	if err = m.Respond(t.Context(), id, c.Items[0].ID, adapter.Answer{}); err == nil {
 		t.Fatal("expired request accepted")
 	}
+}
+
+func TestSendFailureKeepsLiveSession(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		err    error
+		status string
+	}{{"rejected", &adapter.RejectedError{Err: errors.New("request rejected")}, "idle"}, {"timeout", context.DeadlineExceeded, "running"}} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, a := setup(t)
+			id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := a.last
+			native.send = func(context.Context) error { return tt.err }
+			if err = m.Send(t.Context(), id, "keep this session"); !errors.Is(err, tt.err) {
+				t.Fatalf("error=%v", err)
+			}
+			_, c := m.View(id)
+			if !c.Live || c.Status != tt.status {
+				t.Fatalf("live=%v status=%s; want live %s", c.Live, c.Status, tt.status)
+			}
+			if tt.name == "timeout" {
+				if err = m.Send(t.Context(), id, "duplicate"); err == nil {
+					t.Fatal("allowed a second turn before resolving uncertain acceptance")
+				}
+				native.events <- adapter.Event{Kind: "text_done", ID: "late", Text: "The timed-out request did start."}
+				native.events <- adapter.Event{Kind: "turn_done", Status: "completed"}
+				awaitChat(t, m, id, func(c *store.Chat) bool { return c.Status == "idle" })
+			} else {
+				if c.Items[0].Status != "rejected" {
+					t.Fatalf("user item status=%s", c.Items[0].Status)
+				}
+				native.send = nil
+				if err = m.Send(t.Context(), id, "retry"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestEmptyChatRetryIgnoresErrorHistory(t *testing.T) {
+	m, a := setup(t)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = a.last.Close()
+	awaitChat(t, m, id, func(c *store.Chat) bool { return !c.Live })
+	a.openErr = errors.New("temporary launch failure")
+	if err = m.Resume(t.Context(), id); err == nil {
+		t.Fatal("expected failed launch")
+	}
+	a.openErr = nil
+	a.resumed = ""
+	if err = m.Resume(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if a.resumed != "" {
+		t.Fatalf("error-only history caused native resume of %q", a.resumed)
+	}
+}
+
+func TestMessageLimitMatchesBrowserUTF16(t *testing.T) {
+	for _, tt := range []struct {
+		name, text string
+		valid      bool
+	}{{"ASCII", strings.Repeat("+", 100000), true}, {"BMP", strings.Repeat("界", 100000), true}, {"astral", strings.Repeat("😀", 50000), true}, {"too long", strings.Repeat("😀", 50001), false}} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := setup(t)
+			id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = m.Send(t.Context(), id, tt.text)
+			if (err == nil) != tt.valid {
+				t.Fatalf("valid=%v error=%v", tt.valid, err)
+			}
+		})
+	}
+}
+
+type observedStore struct {
+	*store.Store
+	observe func(store.Chat) error
+}
+
+func (s *observedStore) Save(c store.Chat) error {
+	if s.observe != nil {
+		if err := s.observe(c); err != nil {
+			return err
+		}
+	}
+	return s.Store.Save(c)
+}
+
+func TestPersistenceIsIncrementalAndDoesNotBlockViews(t *testing.T) {
+	m, _ := setup(t)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := m.getRuntime(id)
+	for range 12 {
+		if err := m.Send(t.Context(), id, "hello"); err != nil {
+			t.Fatal(err)
+		}
+		m.apply(id, rt, adapter.Event{Kind: "text_done", ID: store.ID(), Text: "reply"})
+		m.apply(id, rt, adapter.Event{Kind: "turn_done"})
+	}
+	entered, release := make(chan store.Chat, 1), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	m.mu.Lock()
+	m.db = &observedStore{Store: m.db.(*store.Store), observe: func(c store.Chat) error {
+		select {
+		case entered <- c:
+		default:
+		}
+		<-release
+		return nil
+	}}
+	m.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		m.apply(id, rt, adapter.Event{Kind: "text_done", ID: "latest", Text: "new output"})
+		close(done)
+	}()
+	saved := <-entered
+	if len(saved.Items) != 1 || saved.Items[0].Body != "new output" {
+		t.Errorf("save rewrote history: %d items, want only the changed item", len(saved.Items))
+	}
+	viewed := make(chan struct{})
+	go func() { m.View(id); m.Read(id, "", 0); close(viewed) }()
+	select {
+	case <-viewed:
+	case <-time.After(time.Second):
+		t.Error("history I/O blocked View/Read")
+	}
+	unblock()
+	<-done
+	<-viewed
+	m.mu.Lock()
+	m.db = m.db.(*observedStore).Store
+	m.mu.Unlock()
+	chats, err := m.db.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chats) != 1 || len(chats[0].Items) != 25 {
+		t.Fatalf("partial saves lost history: %+v", chats)
+	}
+}
+
+func TestFailedSaveRetriesLatestItem(t *testing.T) {
+	m, _ := setup(t)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := m.getRuntime(id)
+	m.apply(id, rt, adapter.Event{Kind: "text_delta", ID: "reply", Text: "first"})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	m.mu.Lock()
+	db := m.db.(*store.Store)
+	var first sync.Once
+	m.db = &observedStore{Store: db, observe: func(store.Chat) error {
+		var err error
+		first.Do(func() { close(entered); <-release; err = errors.New("temporary write failure") })
+		return err
+	}}
+	m.mu.Unlock()
+	done := make(chan struct{})
+	go func() { m.mu.Lock(); _ = m.save(m.chats[id]); m.mu.Unlock(); close(done) }()
+	<-entered
+	m.apply(id, rt, adapter.Event{Kind: "text_delta", ID: "reply", Text: " latest"})
+	unblock()
+	<-done
+	m.mu.Lock()
+	err = m.save(m.chats[id])
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chats, err := db.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chats[0].Items) != 1 || chats[0].Items[0].Body != "first latest" {
+		t.Fatalf("retry overwrote a newer item: %+v", chats[0].Items)
+	}
+}
+
+func TestCloseWaitsForChatBeingSaved(t *testing.T) {
+	m, _ := setup(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	m.mu.Lock()
+	m.db = &observedStore{Store: m.db.(*store.Store), observe: func(store.Chat) error {
+		close(entered)
+		<-release
+		return nil
+	}}
+	m.mu.Unlock()
+	dir := t.TempDir()
+	created := make(chan error, 1)
+	go func() { _, err := m.Create(t.Context(), "codex", dir, adapter.ReadOnly); created <- err }()
+	<-entered
+	closed := make(chan struct{})
+	go func() { _ = m.Close(); close(closed) }()
+	<-m.ctx.Done()
+	select {
+	case <-closed:
+		t.Error("shutdown returned while a new chat still owned a process and a save")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblock()
+	if err := <-created; err == nil {
+		t.Error("created a live chat after shutdown started")
+	}
+	<-closed
 }

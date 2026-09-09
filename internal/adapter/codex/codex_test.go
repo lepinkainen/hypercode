@@ -3,9 +3,14 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"hypercode/internal/adapter"
 	"hypercode/internal/testcodex"
@@ -209,5 +214,90 @@ func TestResolvedServerRequestExpires(t *testing.T) {
 	}
 	if _, exists := s.requests["7"]; exists {
 		t.Fatal("resolved request still accepts replies")
+	}
+}
+
+func TestExplicitRPCRejection(t *testing.T) {
+	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	err = s.Send(t.Context(), "[reject]")
+	var rejected *adapter.RejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("RPC rejection was not classified: %v", err)
+	}
+	if !strings.Contains(err.Error(), "-32602") {
+		t.Fatalf("RPC code lost: %v", err)
+	}
+	if err = s.Send(t.Context(), "a valid retry"); err != nil {
+		t.Fatal(err)
+	}
+	nextKind(t, s, "turn_done")
+}
+
+// The descendant stays alive until the test releases its connection. This makes
+// pipe inheritance deterministic without relying on a particular MCP server.
+func TestInheritedPipeProcess(t *testing.T) {
+	for i, arg := range os.Args {
+		if arg != "pipe-parent" && arg != "pipe-child" {
+			continue
+		}
+		if arg == "pipe-child" {
+			conn, err := net.Dial("tcp", os.Args[i+1])
+			if err != nil {
+				os.Exit(1)
+			}
+			_, _ = io.Copy(io.Discard, conn)
+			os.Exit(0)
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestInheritedPipeProcess$", "--", "pipe-child", os.Args[i+1])
+		if os.Args[i+2] == "stdout" {
+			child.Stdout = os.Stdout
+		} else {
+			child.Stderr = os.Stderr
+		}
+		if child.Start() != nil {
+			os.Exit(1)
+		}
+		if testcodex.Run(os.Stdin, os.Stdout) != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
+
+func TestCloseWithInheritedPipe(t *testing.T) {
+	for _, pipe := range []string{"stdout", "stderr"} {
+		t.Run(pipe, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			a := testAdapter(t)
+			a.Args = []string{"-test.run=^TestInheritedPipeProcess$", "--", "pipe-parent", listener.Addr().String(), pipe}
+			s, err := a.Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
+			child, err := listener.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer child.Close()
+			done := make(chan struct{})
+			go func() { _ = s.Close(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(4 * time.Second):
+				t.Error("Close waited for an unrelated descendant to release " + pipe)
+				_ = child.Close()
+				<-done
+			}
+		})
 	}
 }

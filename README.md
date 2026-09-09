@@ -42,7 +42,7 @@ A restart interrupts active work. Use **Resume chat** to reattach to the stored 
 
 ```sh
 task dev
-task test       # Go tests with the race detector
+task test       # Go race tests and JavaScript lifecycle tests (requires Node.js)
 task lint       # Go formatting check and go vet
 task build
 ```
@@ -55,7 +55,9 @@ For browser work without model calls:
 task dev-fixture -- -addr 127.0.0.1:8091
 ```
 
-This uses separate history in `.cache/fixture` and an offline protocol peer. Messages containing `[approval]`, `[question]`, `[wait]`, or `[crash]` exercise the corresponding flow. Other messages return a Markdown example. The peer never executes commands.
+This uses separate history in `.cache/fixture` and an offline protocol peer. Messages containing `[approval]`, `[question]`, `[wait]`, `[reject]`, or `[crash]` exercise the corresponding flow. Other messages return a Markdown example. The peer never executes commands.
+
+With Playwright CLI open on that fixture server, run `playwright-cli run-code --filename internal/web/browser-regressions.js` to check duplicate submissions, rejection recovery, large messages, and reconnecting after cached-page lifecycle events. The lifecycle unit test also runs with `task test`.
 
 ## Protocol checks
 

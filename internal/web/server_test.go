@@ -119,3 +119,25 @@ func TestSSEInitialSnapshot(t *testing.T) {
 	}
 	t.Fatal("no snapshot")
 }
+
+func TestEncodedMessageFitsRequestLimit(t *testing.T) {
+	s, _ := testServer(t)
+	for _, message := range []string{strings.Repeat("+", 100000), strings.Repeat("界", 100000), strings.Repeat("😀", 50000)} {
+		body := url.Values{"message": {message}}.Encode()
+		reached := false
+		handler := s.boundary(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			if r.FormValue("message") != message {
+				t.Error("message changed during parsing")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		r := httptest.NewRequest("POST", "/chats/test/send", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if !reached || w.Code != http.StatusNoContent {
+			t.Errorf("legal message encoded to %d bytes rejected: %d", len(body), w.Code)
+		}
+	}
+}

@@ -2,9 +2,15 @@
 
 A minimal single-user web UI for coding agent harnesses, run locally or on a persistent VM/VPS accessed through Tailscale. One Go binary, embedded frontend, SQLite for UI history. The installed harness executables are the integration boundary.
 
-Supported harnesses: **Codex**, **Claude Code**, **OpenCode**, **Pi**.
+Planned harnesses: **Codex**, **Claude Code**, **OpenCode**, **Pi**.
 
 Not a fork of T3 Code. Independent repository, Go module, and database. T3 Code's adapters are a reference for protocol behavior, not code to port.
+
+## Single-user scope
+
+The first release supports **Codex only**, behind an adapter contract that can accept the other harnesses later. Hypercode is for one person's private use on their own host. Design and review changes around that person's coding workflow, including long conversations, several active chats, large pasted messages, accidental repeated submissions, browser reconnection, and process restarts.
+
+Prefer small fixes with regression tests for those situations. Do not add multi-tenant infrastructure, distributed coordination, or elaborate compatibility layers for hypothetical production workloads. A new native thread does not recover a missing thread's context; starting fresh must remain explicit. Shutdown must finish even if a subprocess retains a pipe, while process termination remains limited to the process handle captured at spawn.
 
 ## Stack
 

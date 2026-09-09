@@ -3,6 +3,13 @@ package adapter
 
 import "context"
 
+// RejectedError means the agent explicitly refused the request. Other errors,
+// including a timeout, leave its acceptance uncertain until events reconcile it.
+type RejectedError struct{ Err error }
+
+func (e *RejectedError) Error() string { return e.Err.Error() }
+func (e *RejectedError) Unwrap() error { return e.Err }
+
 type PermissionMode string
 
 const (

@@ -18,6 +18,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"hypercode/internal/adapter"
+	"hypercode/internal/limits"
 	"hypercode/internal/session"
 	"hypercode/internal/store"
 )
@@ -50,6 +51,7 @@ type stream struct {
 func New(m *session.Manager, dir string) (*Server, error) {
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	t, err := template.New("").Funcs(template.FuncMap{
+		"messageLimit": func() int { return limits.MaxMessageUnits },
 		"markdown": func(s string) template.HTML {
 			var b bytes.Buffer
 			if md.Convert([]byte(s), &b) != nil {
@@ -114,7 +116,7 @@ func (s *Server) boundary(next http.Handler) http.Handler {
 					return
 				}
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
+			r.Body = http.MaxBytesReader(w, r.Body, limits.MaxFormBytes)
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "Invalid or oversized form", http.StatusBadRequest)
 				return

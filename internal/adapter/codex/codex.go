@@ -43,6 +43,9 @@ type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+func (e *rpcError) Error() string { return fmt.Sprintf("%s (%d)", e.Message, e.Code) }
+
 type pendingRequest struct {
 	id     json.RawMessage
 	method string
@@ -51,6 +54,7 @@ type pendingRequest struct {
 type session struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
+	stdout    io.ReadCloser
 	writeMu   sync.Mutex
 	mu        sync.Mutex
 	calls     map[string]chan packet
@@ -98,6 +102,7 @@ func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.Perm
 	args := append(append([]string{}, a.Args...), "app-server", "--listen", "stdio://")
 	cmd := exec.Command(exe, args...) // Lifetime belongs to the session, never an HTTP request.
 	cmd.Dir = dir
+	cmd.WaitDelay = time.Second
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -106,7 +111,7 @@ func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.Perm
 	if err != nil {
 		return nil, err
 	}
-	s := &session{cmd: cmd, stdin: stdin, calls: map[string]chan packet{}, requests: map[string]pendingRequest{}, events: make(chan adapter.Event, 256), done: make(chan struct{}), closing: make(chan struct{}), stderr: &tailBuffer{}, trace: a.Trace}
+	s := &session{cmd: cmd, stdin: stdin, stdout: stdout, calls: map[string]chan packet{}, requests: map[string]pendingRequest{}, events: make(chan adapter.Event, 256), done: make(chan struct{}), closing: make(chan struct{}), stderr: &tailBuffer{}, trace: a.Trace}
 	cmd.Stderr = s.stderr
 	if err = cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start Codex: %w. Install Codex and run codex login on this host", err)
@@ -180,7 +185,7 @@ func (s *session) call(ctx context.Context, method string, params any, result an
 	select {
 	case p := <-ch:
 		if p.Error != nil {
-			return fmt.Errorf("Codex %s: %s", method, p.Error.Message)
+			return &adapter.RejectedError{Err: fmt.Errorf("Codex %s: %w", method, p.Error)}
 		}
 		if result != nil {
 			return json.Unmarshal(p.Result, result)
@@ -246,7 +251,14 @@ func (s *session) Respond(ctx context.Context, id string, answer adapter.Answer)
 	return nil
 }
 func (s *session) Close() error {
-	s.closeOnce.Do(func() { close(s.closing); _ = s.stdin.Close(); _ = s.cmd.Process.Kill() })
+	s.closeOnce.Do(func() {
+		close(s.closing)
+		_ = s.stdin.Close()
+		_ = s.cmd.Process.Kill()
+		// Unblock the scanner even if a descendant inherited stdout. WaitDelay
+		// separately bounds exec's stderr copier; only our captured process dies.
+		_ = s.stdout.Close()
+	})
 	<-s.done
 	return nil
 }
