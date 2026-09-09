@@ -1,0 +1,30 @@
+version: '3'
+
+env:
+  GOCACHE: '{{.ROOT_DIR}}/.cache/go-build'
+
+tasks:
+  build:
+    desc: Build the single application binary
+    cmds:
+      - go build -trimpath -o bin/hypercode ./cmd/hypercode
+  dev:
+    desc: Run locally
+    cmds:
+      - go run ./cmd/hypercode {{.CLI_ARGS}}
+  test-peer:
+    desc: Build the offline Codex protocol fixture peer
+    cmds:
+      - go build -o bin/testcodex ./internal/testcodex/cmd
+  dev-fixture:
+    desc: Run with an offline agent and isolated history
+    deps: [build, test-peer]
+    cmds:
+      - bin/hypercode -codex '{{.ROOT_DIR}}/bin/testcodex' -data-dir '{{.ROOT_DIR}}/.cache/fixture' {{.CLI_ARGS}}
+  test:
+    cmds:
+      - go test -race ./...
+  lint:
+    cmds:
+      - go run ./internal/checkformat
+      - go vet ./...

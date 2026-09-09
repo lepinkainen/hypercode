@@ -1,0 +1,7 @@
+{"method":"turn/started","params":{"threadId":"recorded-thread","turn":{"id":"turn-1","status":"inProgress"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"recorded-thread","itemId":"message-1","delta":"Hello"}}
+{"method":"item/completed","params":{"threadId":"recorded-thread","item":{"id":"message-1","type":"agentMessage","text":"Hello"}}}
+{"method":"item/started","params":{"threadId":"recorded-thread","item":{"id":"command-1","type":"commandExecution","command":"pwd","status":"inProgress"}}}
+{"method":"item/commandExecution/outputDelta","params":{"threadId":"recorded-thread","itemId":"command-1","delta":"/tmp\n"}}
+{"method":"item/completed","params":{"threadId":"recorded-thread","item":{"id":"command-1","type":"commandExecution","command":"pwd","aggregatedOutput":"/tmp\n","status":"completed","exitCode":0}}}
+{"method":"turn/completed","params":{"threadId":"recorded-thread","turn":{"id":"turn-1","status":"completed","error":null}}}
