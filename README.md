@@ -88,4 +88,4 @@ The spike also accepts `-prompt`, `-mode`, `-approve`, and `-interrupt`. Raw tra
 
 To add another agent, implement `adapter.Adapter`, register it in the entry point, and add a UI selection. Native wire formats stay inside that adapter. The database already records which agent owns each chat.
 
-Remote access and service setup are described in [deployment](docs/deployment.md). The first pass does not include a model picker, terminal, diff viewer, native session import, or public hosting.
+Remote access and service setup are described in [deployment](docs/deployment.md). Scope lives in `PROJECT.md`; design notes (architecture, adapter contract, storage, roadmap) live in `ai-docs/`. The first pass does not include a model picker, terminal, diff viewer, native session import, or public hosting.
