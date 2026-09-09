@@ -52,7 +52,7 @@ func (f *fakeAdapter) Resume(ctx context.Context, dir, ref string, mode adapter.
 }
 func (f *fakeSession) Ref() string   { return "native-ref" }
 func (f *fakeSession) Model() string { return f.model }
-func (f *fakeSession) Send(ctx context.Context, _ string) error {
+func (f *fakeSession) Send(ctx context.Context, _ adapter.Input) error {
 	if f.send != nil {
 		return f.send(ctx)
 	}
@@ -104,10 +104,10 @@ func TestStreamApprovalStopAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = m.Send(t.Context(), id, "Build this"); err != nil {
+	if err = m.Send(t.Context(), id, adapter.Input{Text: "Build this"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = m.Send(t.Context(), id, "second"); err == nil {
+	if err = m.Send(t.Context(), id, adapter.Input{Text: "second"}); err == nil {
 		t.Fatal("concurrent turn accepted")
 	}
 	a.last.events <- adapter.Event{Kind: "text_delta", ID: "msg", Text: "partial "}
@@ -180,7 +180,7 @@ func TestProcessLossAndColdResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = m.Send(t.Context(), id, "hello"); err != nil {
+	if err = m.Send(t.Context(), id, adapter.Input{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	a.last.events <- adapter.Event{Kind: "approval_requested", Prompt: &adapter.Prompt{RequestID: "old-request"}}
@@ -241,7 +241,7 @@ func TestDisconnectDuringSendDoesNotCancelTurn(t *testing.T) {
 	a.last.send = func(ctx context.Context) error { close(entered); <-release; return ctx.Err() }
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- m.Send(ctx, id, "keep working") }()
+	go func() { done <- m.Send(ctx, id, adapter.Input{Text: "keep working"}) }()
 	<-entered
 	cancel()
 	close(release)
@@ -283,7 +283,7 @@ func TestSendFailureKeepsLiveSession(t *testing.T) {
 			}
 			native := a.last
 			native.send = func(context.Context) error { return tt.err }
-			if err = m.Send(t.Context(), id, "keep this session"); !errors.Is(err, tt.err) {
+			if err = m.Send(t.Context(), id, adapter.Input{Text: "keep this session"}); !errors.Is(err, tt.err) {
 				t.Fatalf("error=%v", err)
 			}
 			_, c := m.View(id)
@@ -291,7 +291,7 @@ func TestSendFailureKeepsLiveSession(t *testing.T) {
 				t.Fatalf("live=%v status=%s; want live %s", c.Live, c.Status, tt.status)
 			}
 			if tt.name == "timeout" {
-				if err = m.Send(t.Context(), id, "duplicate"); err == nil {
+				if err = m.Send(t.Context(), id, adapter.Input{Text: "duplicate"}); err == nil {
 					t.Fatal("allowed a second turn before resolving uncertain acceptance")
 				}
 				native.events <- adapter.Event{Kind: "text_done", ID: "late", Text: "The timed-out request did start."}
@@ -302,7 +302,7 @@ func TestSendFailureKeepsLiveSession(t *testing.T) {
 					t.Fatalf("user item status=%s", c.Items[0].Status)
 				}
 				native.send = nil
-				if err = m.Send(t.Context(), id, "retry"); err != nil {
+				if err = m.Send(t.Context(), id, adapter.Input{Text: "retry"}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -343,7 +343,7 @@ func TestMessageLimitMatchesBrowserUTF16(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = m.Send(t.Context(), id, tt.text)
+			err = m.Send(t.Context(), id, adapter.Input{Text: tt.text})
 			if (err == nil) != tt.valid {
 				t.Fatalf("valid=%v error=%v", tt.valid, err)
 			}
@@ -373,7 +373,7 @@ func TestPersistenceIsIncrementalAndDoesNotBlockViews(t *testing.T) {
 	}
 	rt, _ := m.getRuntime(id)
 	for range 12 {
-		if err := m.Send(t.Context(), id, "hello"); err != nil {
+		if err := m.Send(t.Context(), id, adapter.Input{Text: "hello"}); err != nil {
 			t.Fatal(err)
 		}
 		m.apply(id, rt, adapter.Event{Kind: "text_done", ID: store.ID(), Text: "reply"})
@@ -533,5 +533,52 @@ func TestModelSelection(t *testing.T) {
 	}
 	if a.model != "fake-fast" {
 		t.Fatalf("resume dropped model: %q", a.model)
+	}
+}
+
+func TestAttachmentOnlySendAndSnapshot(t *testing.T) {
+	m, a := setup(t)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := adapter.Attachment{ID: store.ID(), Name: "screenshot.png", MediaType: "image/png", Size: 123, Path: "/host/image.png"}
+	a.last.send = func(context.Context) error {
+		chats, err := m.db.(*store.Store).Load()
+		if err != nil || len(chats[0].Items[0].Attachments) != 1 {
+			t.Errorf("dispatch preceded persistence: %v", err)
+		}
+		return &adapter.RejectedError{Err: errors.New("test rejection")}
+	}
+	if err := m.Send(t.Context(), id, adapter.Input{Attachments: []adapter.Attachment{file}}); err == nil {
+		t.Fatal("expected rejection")
+	}
+	_, c := m.View(id)
+	if c.Title != file.Name || c.Items[0].Status != "rejected" || len(c.Items[0].Attachments) != 1 {
+		t.Fatalf("attachment-only message: %+v", c)
+	}
+	c.Items[0].Attachments[0].Name = "mutated"
+	_, c = m.View(id)
+	if c.Items[0].Attachments[0].Name != file.Name || c.Items[0].Attachments[0].Path != "" {
+		t.Fatal("snapshot leaked mutable attachment or host path")
+	}
+}
+
+func TestFailedAttachmentSaveDropsReferences(t *testing.T) {
+	m, a := setup(t)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.last.send = func(context.Context) error { t.Error("dispatched after failed save"); return nil }
+	m.mu.Lock()
+	m.db = &observedStore{Store: m.db.(*store.Store), observe: func(store.Chat) error { return errors.New("disk full") }}
+	m.mu.Unlock()
+	if err := m.Send(t.Context(), id, adapter.Input{Attachments: []adapter.Attachment{{ID: store.ID(), Name: "notes.txt"}}}); err == nil {
+		t.Fatal("save succeeded")
+	}
+	_, c := m.View(id)
+	if len(c.Items[0].Attachments) != 0 || c.Items[0].Status != "rejected" {
+		t.Fatal("failed save retained attachment references")
 	}
 }

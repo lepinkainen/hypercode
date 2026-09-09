@@ -30,14 +30,15 @@ type Chat struct {
 	Live      bool // Runtime state, never persisted.
 }
 type Item struct {
-	ID        string
-	ChatID    string
-	Ordinal   int
-	Kind      string
-	Status    string
-	Body      string
-	Prompt    *adapter.Prompt
-	CreatedAt time.Time
+	ID          string
+	ChatID      string
+	Ordinal     int
+	Kind        string
+	Status      string
+	Attachments []adapter.Attachment
+	Body        string
+	Prompt      *adapter.Prompt
+	CreatedAt   time.Time
 }
 type Store struct{ db *sql.DB }
 
@@ -116,9 +117,10 @@ func (s *Store) Save(c Chat) error {
 	}
 	for _, i := range c.Items {
 		body, err := json.Marshal(struct {
-			Text   string          `json:"text"`
-			Prompt *adapter.Prompt `json:"prompt,omitempty"`
-		}{i.Body, i.Prompt})
+			Attachments []adapter.Attachment `json:"attachments,omitempty"`
+			Text        string               `json:"text"`
+			Prompt      *adapter.Prompt      `json:"prompt,omitempty"`
+		}{i.Attachments, i.Body, i.Prompt})
 		if err != nil {
 			return err
 		}
@@ -175,12 +177,14 @@ func (s *Store) items(id string) ([]Item, error) {
 			return nil, err
 		}
 		var data struct {
-			Text   string          `json:"text"`
-			Prompt *adapter.Prompt `json:"prompt"`
+			Attachments []adapter.Attachment `json:"attachments,omitempty"`
+			Text        string               `json:"text"`
+			Prompt      *adapter.Prompt      `json:"prompt"`
 		}
 		if err = json.Unmarshal([]byte(body), &data); err != nil {
 			return nil, fmt.Errorf("decode item %s: %w", i.ID, err)
 		}
+		i.Attachments = data.Attachments
 		i.Body = data.Text
 		i.Prompt = data.Prompt
 		i.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)

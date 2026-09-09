@@ -48,3 +48,18 @@ Verified on 2026-09-09 with Claude Code 2.1.263 through `cmd/claude-spike`:
 - Interrupted a response after its first text delta. The result carried `terminal_reason: aborted_streaming`.
 - Resumed the approval session cold with `--resume`; the model recalled the denied command.
 - Resumed an unknown session id; the process exited before answering `initialize` and the open failed with the CLI's message.
+
+## Attachment verification
+
+Verified on 2026-09-10 against codex-cli 0.153.4 and Claude Code 2.1.266:
+
+- Both CLIs accepted an image-only message and identified the solid red test image.
+- Both recalled that image after a cold resume.
+- Both read text and PDF fixtures outside the working directory in read-only, workspace-write, and full-access modes. Claude requested Read approvals in read-only and workspace-write modes; the test explicitly allowed those reads. Codex used the host's `pdftotext`.
+- Mixed image/document prompts returned both document verification words and the image color.
+
+Redacted image-response recordings are in each adapter's `testdata/recorded-image.jsonl`. Raw traffic is excluded from the repository. Offline peers verify image count and bytes, and tests cover mixed and image-only native inputs, file validation, upload cleanup, persistence, and serving rules.
+
+`internal/web/browser-attachments.js` checks pasted images with text, file selection/removal, drafts across chat navigation, upload feedback, duplicate submission prevention, navigation during an upload, rejection/retry, network failure, attachment-only sends, refresh, size rejection, both adapters, document downloads, and a mobile viewport. Screenshots are saved to `output/playwright/attachments-{mobile,desktop}.png`.
+
+A fixture-server restart preserved attachment history and original file bytes. Explicit resume worked afterward.

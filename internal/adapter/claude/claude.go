@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -342,7 +343,22 @@ func (s *session) control(ctx context.Context, request map[string]any, timeout t
 		return nil, ctx.Err()
 	}
 }
-func (s *session) Send(ctx context.Context, text string) error {
+func (s *session) Send(ctx context.Context, in adapter.Input) error {
+	content := []map[string]any{}
+	if text := in.Prompt(); text != "" {
+		content = append(content, map[string]any{"type": "text", "text": text})
+	}
+	for _, a := range in.Attachments {
+		if !a.Image() {
+			continue
+		}
+		data, err := os.ReadFile(a.Path)
+		if err != nil {
+			return &adapter.RejectedError{Err: err}
+		}
+		content = append(content, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": a.MediaType, "data": base64.StdEncoding.EncodeToString(data)}})
+	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -352,7 +368,7 @@ func (s *session) Send(ctx context.Context, text string) error {
 	s.mu.Unlock()
 	// The CLI does not acknowledge a prompt; the result frame is the only
 	// completion signal, so a successful write is acceptance.
-	return s.write(map[string]any{"type": "user", "session_id": ref, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": text}}}})
+	return s.write(map[string]any{"type": "user", "session_id": ref, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": content}})
 }
 func (s *session) Stop(ctx context.Context) error {
 	s.mu.Lock()
@@ -455,7 +471,7 @@ func (s *session) read(stdout io.Reader) {
 	defer close(s.events)
 	defer close(s.done)
 	scan := bufio.NewScanner(stdout)
-	scan.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	scan.Buffer(make([]byte, 64*1024), 40*1024*1024)
 	for scan.Scan() {
 		line := bytes.TrimSpace(scan.Bytes())
 		if len(line) == 0 {

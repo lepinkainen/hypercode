@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 )
 
@@ -14,7 +15,7 @@ import (
 // Waiting turns advance only when the client replies or interrupts them.
 func Run(in io.Reader, out io.Writer) error {
 	scan := bufio.NewScanner(in)
-	scan.Buffer(make([]byte, 65536), 1024*1024)
+	scan.Buffer(make([]byte, 65536), 40*1024*1024)
 	enc := json.NewEncoder(out)
 	write := func(v any) { _ = enc.Encode(v) }
 	event := func(method string, params any) { write(map[string]any{"method": method, "params": params}) }
@@ -63,12 +64,25 @@ func Run(in io.Reader, out io.Writer) error {
 			var args struct {
 				Input []struct {
 					Text string `json:"text"`
+					Type string `json:"type"`
+					Path string `json:"path"`
 				} `json:"input"`
 			}
 			_ = json.Unmarshal(p.Params, &args)
 			text := ""
-			if len(args.Input) > 0 {
-				text = args.Input[0].Text
+			images, imageBytes := 0, 0
+			for _, input := range args.Input {
+				if input.Type == "text" {
+					text += input.Text
+				}
+				if input.Type == "localImage" {
+					b, err := os.ReadFile(input.Path)
+					if err != nil {
+						return err
+					}
+					images++
+					imageBytes += len(b)
+				}
 			}
 			if strings.Contains(text, "[reject]") {
 				write(map[string]any{"id": p.ID, "error": map[string]any{"code": -32602, "message": "Fixture request rejected"}})
@@ -98,6 +112,8 @@ func Run(in io.Reader, out io.Writer) error {
 			case strings.Contains(text, "[wait]"):
 				waiting = "wait"
 				event("item/agentMessage/delta", map[string]any{"threadId": ref, "itemId": item, "delta": "Working on your task. This turn waits for Stop."})
+			case images > 0:
+				finish(fmt.Sprintf("Received %d images (%d bytes). %s", images, imageBytes, text), "completed")
 			default:
 				finish("I explored the project.\n\n## Ready to build\n\n- **Codex streaming** is connected (model: "+model+").\n- History stays on this host.\n\n```go\nfmt.Println(\"Hello, Hypercode\")\n```", "completed")
 			}

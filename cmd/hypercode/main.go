@@ -64,7 +64,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	app, err := web.New(m, cwd)
+	app, err := web.New(m, cwd, filepath.Join(*data, "attachments"))
 	if err != nil {
 		return err
 	}

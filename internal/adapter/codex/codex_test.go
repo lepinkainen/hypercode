@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestLifecycle(t *testing.T) {
 	if s.Model() != "fixture-large" {
 		t.Fatalf("effective model not reported: %q", s.Model())
 	}
-	if err = s.Send(t.Context(), "[approval]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[approval]"}); err != nil {
 		t.Fatal(err)
 	}
 	prompt := nextKind(t, s, "approval_requested")
@@ -81,7 +82,7 @@ func TestLifecycle(t *testing.T) {
 	if err = s.Respond(t.Context(), prompt.ID, adapter.Answer{Decision: "accept"}); err == nil {
 		t.Fatal("accepted duplicate approval")
 	}
-	if err = s.Send(t.Context(), "[question]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[question]"}); err != nil {
 		t.Fatal(err)
 	}
 	q := nextKind(t, s, "question_asked")
@@ -92,7 +93,7 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	nextKind(t, s, "turn_done")
-	if err = s.Send(t.Context(), "[wait]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[wait]"}); err != nil {
 		t.Fatal(err)
 	}
 	nextKind(t, s, "text_delta")
@@ -112,7 +113,7 @@ func TestLifecycle(t *testing.T) {
 	if resumed.Ref() != ref {
 		t.Fatal("resume changed reference")
 	}
-	if err = resumed.Send(t.Context(), "hello"); err != nil {
+	if err = resumed.Send(t.Context(), adapter.Input{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	nextKind(t, resumed, "turn_done")
@@ -123,7 +124,7 @@ func TestProcessLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	_ = s.Send(t.Context(), "[crash]")
+	_ = s.Send(t.Context(), adapter.Input{Text: "[crash]"})
 	nextKind(t, s, "error")
 }
 func TestNotificationFixture(t *testing.T) {
@@ -157,7 +158,7 @@ func TestMissingExecutable(t *testing.T) {
 }
 
 func TestRecordedProtocol(t *testing.T) {
-	for _, name := range []string{"live", "approval", "interrupt"} {
+	for _, name := range []string{"live", "approval", "interrupt", "image"} {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile("testdata/recorded-" + name + ".jsonl")
 			if err != nil {
@@ -197,6 +198,9 @@ func TestRecordedProtocol(t *testing.T) {
 			if name == "approval" && !approval {
 				t.Fatal("recorded approval not emitted")
 			}
+			if name == "image" && !strings.Contains(strings.ToLower(body), "red") {
+				t.Fatalf("image response lost: %q", body)
+			}
 			expected := "completed"
 			if name == "interrupt" {
 				expected = "interrupted"
@@ -226,7 +230,7 @@ func TestExplicitRPCRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	err = s.Send(t.Context(), "[reject]")
+	err = s.Send(t.Context(), adapter.Input{Text: "[reject]"})
 	var rejected *adapter.RejectedError
 	if !errors.As(err, &rejected) {
 		t.Fatalf("RPC rejection was not classified: %v", err)
@@ -234,7 +238,7 @@ func TestExplicitRPCRejection(t *testing.T) {
 	if !strings.Contains(err.Error(), "-32602") {
 		t.Fatalf("RPC code lost: %v", err)
 	}
-	if err = s.Send(t.Context(), "a valid retry"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "a valid retry"}); err != nil {
 		t.Fatal(err)
 	}
 	nextKind(t, s, "turn_done")
@@ -311,7 +315,7 @@ func TestPlainTextStdoutIsNotFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err = s.Send(t.Context(), "[noise]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[noise]"}); err != nil {
 		t.Fatal(err)
 	}
 	var kinds []string
@@ -384,10 +388,41 @@ func TestModelParam(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err = s.Send(t.Context(), "hello"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if e := nextKind(t, s, "text_done"); !strings.Contains(e.Text, "model: fixture-small") {
 		t.Fatalf("model not passed to thread/start: %q", e.Text)
+	}
+}
+
+func TestAttachmentInputs(t *testing.T) {
+	a := testAdapter(t)
+	s, err := a.Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	path := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(path, []byte("image fixture bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	img := adapter.Attachment{Name: "image.png", Path: path, MediaType: "image/png"}
+	for _, text := range []string{"", "Review these"} {
+		in := adapter.Input{Text: text, Attachments: []adapter.Attachment{img, img}}
+		if text != "" {
+			in.Attachments = append(in.Attachments, adapter.Attachment{Name: "notes.txt", Path: "/tmp/notes.txt", MediaType: "text/plain"})
+		}
+		if err := s.Send(t.Context(), in); err != nil {
+			t.Fatal(err)
+		}
+		got := nextKind(t, s, "text_done").Text
+		if !strings.Contains(got, "Received 2 images (38 bytes)") {
+			t.Fatalf("image payload lost: %s", got)
+		}
+		if text != "" && (!strings.Contains(got, text) || !strings.Contains(got, "/tmp/notes.txt")) {
+			t.Fatalf("document reference lost: %s", got)
+		}
+		nextKind(t, s, "turn_done")
 	}
 }

@@ -4,6 +4,7 @@ package testclaude
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ func Run(in io.Reader, out io.Writer, sessionID, model string) error {
 		model = "fixture-model"
 	}
 	scan := bufio.NewScanner(in)
-	scan.Buffer(make([]byte, 65536), 1024*1024)
+	scan.Buffer(make([]byte, 65536), 40*1024*1024)
 	enc := json.NewEncoder(out)
 	write := func(v any) { _ = enc.Encode(v) }
 	turn := 0
@@ -80,7 +81,13 @@ func Run(in io.Reader, out io.Writer, sessionID, model string) error {
 			} `json:"response"`
 			Message struct {
 				Content []struct {
-					Text string `json:"text"`
+					Text   string `json:"text"`
+					Type   string `json:"type"`
+					Source struct {
+						Type      string `json:"type"`
+						MediaType string `json:"media_type"`
+						Data      string `json:"data"`
+					} `json:"source"`
 				} `json:"content"`
 			} `json:"message"`
 		}
@@ -105,8 +112,22 @@ func Run(in io.Reader, out io.Writer, sessionID, model string) error {
 			}
 		case "user":
 			text := ""
-			if len(p.Message.Content) > 0 {
-				text = p.Message.Content[0].Text
+			images, imageBytes := 0, 0
+			for _, input := range p.Message.Content {
+				if input.Type == "text" {
+					text += input.Text
+				}
+				if input.Type == "image" {
+					if input.Source.Type != "base64" || !strings.HasPrefix(input.Source.MediaType, "image/") {
+						return fmt.Errorf("invalid image source")
+					}
+					b, err := base64.StdEncoding.DecodeString(input.Source.Data)
+					if err != nil {
+						return err
+					}
+					images++
+					imageBytes += len(b)
+				}
 			}
 			turn++
 			tool = fmt.Sprintf("tool-%d", turn)
@@ -137,6 +158,8 @@ func Run(in io.Reader, out io.Writer, sessionID, model string) error {
 				waiting = "wait"
 				stream(map[string]any{"type": "message_start", "message": map[string]any{"id": fmt.Sprintf("message-%d", turn), "role": "assistant", "content": []any{}}})
 				stream(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": "Working on your task. This turn waits for Stop."}})
+			case images > 0:
+				finish(fmt.Sprintf("Received %d images (%d bytes). %s", images, imageBytes, text))
 			default:
 				finish("I explored the project.\n\n## Ready to build\n\n- **Claude Code streaming** is connected (model: " + model + ").\n- History stays on this host.\n\n```go\nfmt.Println(\"Hello, Hypercode\")\n```")
 			}

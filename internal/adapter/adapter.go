@@ -1,7 +1,11 @@
 // Package adapter defines the boundary between Hypercode and installed agents.
 package adapter
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 // RejectedError means the agent explicitly refused the request. Other errors,
 // including a timeout, leave its acceptance uncertain until events reconcile it.
@@ -46,7 +50,7 @@ type Session interface {
 	// Model is the native model id the session actually runs with, resolved
 	// from the harness default when Open received an empty model.
 	Model() string
-	Send(context.Context, string) error
+	Send(context.Context, Input) error
 	Stop(context.Context) error
 	Respond(context.Context, string, Answer) error
 	Events() <-chan Event
@@ -81,4 +85,33 @@ type Event struct {
 	Text   string
 	Status string
 	Prompt *Prompt
+}
+
+// Attachment describes a validated upload. Path is resolved by the host and
+// deliberately excluded from stored history and browser payloads.
+type Attachment struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	Size      int64  `json:"size"`
+	Path      string `json:"-"`
+}
+
+func (a Attachment) Image() bool { return strings.HasPrefix(a.MediaType, "image/") }
+
+type Input struct {
+	Text        string
+	Attachments []Attachment
+}
+
+// Prompt includes document references; image bytes use native input blocks.
+func (in Input) Prompt() string {
+	var b strings.Builder
+	b.WriteString(in.Text)
+	for _, a := range in.Attachments {
+		if !a.Image() {
+			fmt.Fprintf(&b, "\n\nAttached document %q (%s): %q\nRead this file using your tools. Request permission if required. Report if it cannot be read.", a.Name, a.MediaType, a.Path)
+		}
+	}
+	return b.String()
 }

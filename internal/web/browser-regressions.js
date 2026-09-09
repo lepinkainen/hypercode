@@ -4,6 +4,7 @@ async (page) => {
   await page.unrouteAll({behavior: "ignoreErrors"});
   await page.goto(page.url().split("/").slice(0, 3).join("/") + "/");
   await page.locator("#new-chat-form button").waitFor();
+  await page.locator("#harness").selectOption("codex");
   let requests = 0, arrived, release;
   const started = new Promise(resolve => { arrived = resolve; });
   const gate = new Promise(resolve => { release = resolve; });

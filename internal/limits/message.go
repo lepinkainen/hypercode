@@ -21,3 +21,15 @@ func MessageFits(text string) bool {
 	}
 	return true
 }
+
+// Attachment limits are also exposed to the composer. Image size uses decimal
+// bytes to stay below providers' 5 MB limit, before base64 encoding.
+const (
+	MaxAttachments           = 5
+	MaxImageBytes      int64 = 5_000_000
+	MaxDocumentBytes   int64 = 20 * 1024 * 1024
+	MaxAttachmentBytes int64 = 25 * 1024 * 1024
+	MaxUploadBytes     int64 = MaxAttachmentBytes + MaxFormBytes + 64*1024
+	MaxImageDimension        = 8000
+	MaxImagePixels           = 16_000_000
+)

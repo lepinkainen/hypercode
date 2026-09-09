@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 
 	"github.com/lepinkainen/hypercode/internal/adapter"
 	"github.com/lepinkainen/hypercode/internal/adapter/codex"
@@ -31,6 +33,7 @@ func run() error {
 	interrupt := flag.Bool("interrupt", false, "Interrupt after the first text delta")
 	model := flag.String("model", "", "Native model id; empty keeps the agent default")
 	listModels := flag.Bool("models", false, "List the model catalog and exit")
+	imagePath := flag.String("image", "", "Image file to attach")
 	flag.Parse()
 	var trace io.Writer
 	if *record != "" {
@@ -70,7 +73,19 @@ func run() error {
 	}
 	defer s.Close()
 	fmt.Println("Thread:", s.Ref(), "model:", s.Model())
-	if err = s.Send(ctx, *prompt); err != nil {
+	input := adapter.Input{Text: *prompt}
+	if *imagePath != "" {
+		path, e := filepath.Abs(*imagePath)
+		if e != nil {
+			return e
+		}
+		data, e := os.ReadFile(path)
+		if e != nil {
+			return e
+		}
+		input.Attachments = []adapter.Attachment{{Name: filepath.Base(path), Path: path, MediaType: http.DetectContentType(data), Size: int64(len(data))}}
+	}
+	if err = s.Send(ctx, input); err != nil {
 		return err
 	}
 	stopped := false

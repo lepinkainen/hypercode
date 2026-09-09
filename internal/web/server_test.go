@@ -26,7 +26,7 @@ func testServer(t *testing.T) (*Server, *session.Manager) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(m, "/tmp/project")
+	s, err := New(m, "/tmp/project", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

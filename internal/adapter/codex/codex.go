@@ -256,10 +256,20 @@ func (s *session) call(ctx context.Context, method string, params any, result an
 		return ctx.Err()
 	}
 }
-func (s *session) Send(ctx context.Context, text string) error {
+func (s *session) Send(ctx context.Context, in adapter.Input) error {
+	input := []map[string]any{}
+	if text := in.Prompt(); text != "" {
+		input = append(input, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
+	}
+	for _, a := range in.Attachments {
+		if a.Image() {
+			input = append(input, map[string]any{"type": "localImage", "path": a.Path})
+		}
+	}
+
 	// turn/started is authoritative; setting the ID from a late RPC response can
 	// resurrect an already completed turn.
-	return s.call(ctx, "turn/start", map[string]any{"threadId": s.Ref(), "input": []map[string]any{{"type": "text", "text": text, "text_elements": []any{}}}}, nil)
+	return s.call(ctx, "turn/start", map[string]any{"threadId": s.Ref(), "input": input}, nil)
 }
 func (s *session) Stop(ctx context.Context) error {
 	s.mu.Lock()
@@ -331,7 +341,7 @@ func (s *session) read(stdout io.Reader) {
 	defer close(s.events)
 	defer close(s.done)
 	scan := bufio.NewScanner(stdout)
-	scan.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	scan.Buffer(make([]byte, 64*1024), 40*1024*1024)
 	for scan.Scan() {
 		line := bytes.TrimSpace(scan.Bytes())
 		if len(line) == 0 {

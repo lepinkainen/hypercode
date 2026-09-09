@@ -29,6 +29,7 @@ The default data directory is `hypercode` under the OS user configuration direct
 - Recent chats, project directories, and per-chat permissions.
 - Streamed assistant text, safe Markdown rendering, and expandable tool activity.
 - Inline command/file approvals and structured questions from both agents.
+- Paste images or attach PNG, JPEG, WebP, TXT, Markdown, and PDF files. Image-only messages are supported.
 - Stop and explicit resume. One active turn per chat.
 - SQLite history, partial output persistence, browser refresh survival, and SSE reconnection.
 - Recovery after the agent exits or Hypercode restarts. Stale prompts become interrupted and reject replies.
@@ -90,3 +91,15 @@ The spike also accepts `-prompt`, `-mode`, `-approve`, and `-interrupt`. Raw tra
 To add another agent, implement `adapter.Adapter`, register it in the entry point, and add a UI selection. Native wire formats stay inside that adapter. The database already records which agent owns each chat.
 
 Remote access and service setup are described in [deployment](docs/deployment.md). Scope lives in `PROJECT.md`; design notes (architecture, adapter contract, storage, roadmap) live in `ai-docs/`. The first pass does not include a model picker, terminal, diff viewer, native session import, or public hosting.
+
+## Chat attachments
+
+Use **Attach files** or paste an image into the composer. Review thumbnails and filenames before sending; remove a draft attachment with its × button. Text and files survive switching chats within the page and remain available after a failed send. Unsaved drafts do not survive a full reload. The composer shows **Uploading…** while a send is pending.
+
+Each message accepts up to five files, with a 25 MiB combined limit. Images are limited to 5,000,000 bytes, 8,000 pixels per side, and 16 megapixels. Text documents and PDFs are limited to 20 MiB each. TXT and Markdown files must contain UTF-8 text. DOCX and other office formats are not supported in this version.
+
+Sent attachments live under `<data-dir>/attachments` and remain available after refresh or restart. Include that directory when backing up `hypercode.db`. Documents download from history; image thumbnails open the original image.
+
+Agents receive images directly. They read documents from the host with their tools and may request permission because uploads are outside the project directory. Codex PDF support requires `pdftotext` on the host PATH; its file picker omits PDFs when it is unavailable. Scanned PDFs may require OCR tools and are not guaranteed to yield text. Hypercode does not install document tools or change agent permissions.
+
+Interrupted temporary uploads are removed at startup. Completed files referenced by history are retained, including rejected turns. Automatic cleanup of unused completed files and duplicate detection after a lost response are deferred.

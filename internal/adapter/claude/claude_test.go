@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestLifecycle(t *testing.T) {
 	if err = s.Stop(t.Context()); err == nil {
 		t.Fatal("Stop before any turn should fail")
 	}
-	if err = s.Send(t.Context(), "[approval]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[approval]"}); err != nil {
 		t.Fatal(err)
 	}
 	nextKind(t, s, "tool_started")
@@ -91,7 +92,7 @@ func TestLifecycle(t *testing.T) {
 	if e := nextKind(t, s, "turn_done"); e.Status != "completed" {
 		t.Fatalf("turn=%+v", e)
 	}
-	if err = s.Send(t.Context(), "[question]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[question]"}); err != nil {
 		t.Fatal(err)
 	}
 	q := nextKind(t, s, "question_asked")
@@ -109,7 +110,7 @@ func TestLifecycle(t *testing.T) {
 		t.Fatalf("answers not keyed by question text: %s", text.Text)
 	}
 	nextKind(t, s, "turn_done")
-	if err = s.Send(t.Context(), "[wait]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[wait]"}); err != nil {
 		t.Fatal(err)
 	}
 	nextKind(t, s, "text_delta")
@@ -130,7 +131,7 @@ func TestLifecycle(t *testing.T) {
 	if resumed.Ref() != ref {
 		t.Fatalf("resume changed ref: %s", resumed.Ref())
 	}
-	if err = resumed.Send(t.Context(), "hello again"); err != nil {
+	if err = resumed.Send(t.Context(), adapter.Input{Text: "hello again"}); err != nil {
 		t.Fatal(err)
 	}
 	if e := nextKind(t, resumed, "text_done"); !strings.Contains(e.Text, "Ready to build") {
@@ -144,7 +145,7 @@ func TestProcessLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	_ = s.Send(t.Context(), "[crash]")
+	_ = s.Send(t.Context(), adapter.Input{Text: "[crash]"})
 	e := nextKind(t, s, "error")
 	if !strings.Contains(e.Text, "Resume the chat") {
 		t.Fatalf("error=%q", e.Text)
@@ -165,7 +166,7 @@ func TestCancelledRequestExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err = s.Send(t.Context(), "[cancel]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[cancel]"}); err != nil {
 		t.Fatal(err)
 	}
 	approval := nextKind(t, s, "approval_requested")
@@ -186,7 +187,7 @@ func TestPlainTextStdoutIsNotFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err = s.Send(t.Context(), "[noise]"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "[noise]"}); err != nil {
 		t.Fatal(err)
 	}
 	noticed := false
@@ -257,7 +258,7 @@ func TestSyntheticFixture(t *testing.T) {
 	}
 }
 func TestRecordedProtocol(t *testing.T) {
-	for _, name := range []string{"live", "approval", "question", "interrupt"} {
+	for _, name := range []string{"live", "approval", "question", "interrupt", "image"} {
 		t.Run(name, func(t *testing.T) {
 			var body, status string
 			var prompt *adapter.Prompt
@@ -287,6 +288,9 @@ func TestRecordedProtocol(t *testing.T) {
 				if prompt == nil || len(prompt.Questions) != 1 || prompt.Questions[0].ID != "Which color?" || prompt.Questions[0].Options[1].Label != "Blue" {
 					t.Fatalf("prompt=%+v", prompt)
 				}
+			}
+			if name == "image" && !strings.Contains(strings.ToLower(body), "red") {
+				t.Fatalf("image response lost: %q", body)
 			}
 			expected := "completed"
 			if name == "interrupt" {
@@ -329,10 +333,64 @@ func TestModelFlag(t *testing.T) {
 	if s.Model() != "fixture-fast" {
 		t.Fatalf("model=%q", s.Model())
 	}
-	if err = s.Send(t.Context(), "hello"); err != nil {
+	if err = s.Send(t.Context(), adapter.Input{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if e := nextKind(t, s, "text_done"); !strings.Contains(e.Text, "model: fixture-fast") {
 		t.Fatalf("model flag not passed: %q", e.Text)
 	}
+}
+
+func TestAttachmentInputs(t *testing.T) {
+	a := testAdapter(t)
+	s, err := a.Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	path := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(path, []byte("image fixture bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	img := adapter.Attachment{Name: "image.png", Path: path, MediaType: "image/png"}
+	for _, text := range []string{"", "Review these"} {
+		in := adapter.Input{Text: text, Attachments: []adapter.Attachment{img, img}}
+		if text != "" {
+			in.Attachments = append(in.Attachments, adapter.Attachment{Name: "notes.txt", Path: "/tmp/notes.txt", MediaType: "text/plain"})
+		}
+		if err := s.Send(t.Context(), in); err != nil {
+			t.Fatal(err)
+		}
+		got := nextKind(t, s, "text_done").Text
+		if !strings.Contains(got, "Received 2 images (38 bytes)") {
+			t.Fatalf("image payload lost: %s", got)
+		}
+		if text != "" && (!strings.Contains(got, text) || !strings.Contains(got, "/tmp/notes.txt")) {
+			t.Fatalf("document reference lost: %s", got)
+		}
+		nextKind(t, s, "turn_done")
+	}
+}
+
+func TestLargeImageFrame(t *testing.T) {
+	a := testAdapter(t)
+	s, err := a.Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	path := filepath.Join(t.TempDir(), "large.png")
+	// Three allowed-size images produce a base64 input larger than 16 MiB.
+	if err := os.WriteFile(path, make([]byte, 4_500_000), 0600); err != nil {
+		t.Fatal(err)
+	}
+	img := adapter.Attachment{Name: "large.png", Path: path, MediaType: "image/png"}
+	if err := s.Send(t.Context(), adapter.Input{Attachments: []adapter.Attachment{img, img, img}}); err != nil {
+		t.Fatal(err)
+	}
+	got := nextKind(t, s, "text_done").Text
+	if !strings.Contains(got, "Received 3 images (13500000 bytes)") {
+		t.Fatal(got)
+	}
+	nextKind(t, s, "turn_done")
 }

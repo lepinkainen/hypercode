@@ -203,6 +203,9 @@ func (m *Manager) publish(c *store.Chat, item *store.Item) {
 func clone(c *store.Chat) store.Chat {
 	v := *c
 	v.Items = append([]store.Item(nil), c.Items...)
+	for n := range v.Items {
+		v.Items[n].Attachments = slices.Clone(v.Items[n].Attachments)
+	}
 	return v
 }
 func (m *Manager) listLocked() []store.Chat {
@@ -351,13 +354,14 @@ func (m *Manager) getRuntime(id string) (*runtime, error) {
 	}
 	return rt, nil
 }
-func (m *Manager) Send(ctx context.Context, id, text string) error {
+func (m *Manager) Send(ctx context.Context, id string, input adapter.Input) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return errors.New("write a message first")
+	text := strings.TrimSpace(input.Text)
+	input.Text = text
+	if text == "" && len(input.Attachments) == 0 {
+		return errors.New("write a message or attach a file first")
 	}
 	if !limits.MessageFits(text) {
 		return errors.New("message is too long")
@@ -381,16 +385,33 @@ func (m *Manager) Send(ctx context.Context, id, text string) error {
 	c.Status = "running"
 	c.UpdatedAt = time.Now()
 	if c.Title == "New chat" {
-		r := []rune(strings.Join(strings.Fields(text), " "))
+		title := text
+		if title == "" {
+			title = input.Attachments[0].Name
+		}
+		r := []rune(strings.Join(strings.Fields(title), " "))
 		if len(r) > 52 {
 			r = append(r[:52], '…')
 		}
 		c.Title = string(r)
 	}
 	item := m.newItem(c, "user", "done", text)
+	item.Attachments = slices.Clone(input.Attachments)
+	for n := range item.Attachments {
+		item.Attachments[n].Path = ""
+	}
 	itemID := item.ID
 	m.publish(c, item)
 	if err = m.save(c); err != nil {
+		// No native dispatch occurred. Remove references so the HTTP owner can
+		// discard uploads; the failed item remains visibly unsent.
+		for n := range c.Items {
+			if c.Items[n].ID == itemID {
+				c.Items[n].Attachments = nil
+				c.Items[n].Status = "rejected"
+				m.publish(c, &c.Items[n])
+			}
+		}
 		c.Status = "error"
 		m.publish(c, nil)
 		m.mu.Unlock()
@@ -398,7 +419,7 @@ func (m *Manager) Send(ctx context.Context, id, text string) error {
 	}
 	m.mu.Unlock()
 	// Once accepted, work belongs to the application even if the POST disconnects.
-	if err = rt.native.Send(m.ctx, text); err != nil {
+	if err = rt.native.Send(m.ctx, input); err != nil {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.runtimes[id] != rt {

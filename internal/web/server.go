@@ -9,13 +9,16 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/attachments"
 	"github.com/lepinkainen/hypercode/internal/limits"
 	"github.com/lepinkainen/hypercode/internal/session"
 	"github.com/lepinkainen/hypercode/internal/store"
@@ -27,6 +30,7 @@ import (
 var files embed.FS
 
 type Server struct {
+	uploads   *attachments.Store
 	manager   *session.Manager
 	templates *template.Template
 	handler   http.Handler
@@ -59,10 +63,37 @@ type stream struct {
 // harnessNames maps harness keys to display names; keys must match the SVG sprite ids in app.html.
 var harnessNames = map[string]string{"codex": "Codex", "claude": "Claude", "gemini": "Gemini CLI"}
 
-func New(m *session.Manager, dir string) (*Server, error) {
+func New(m *session.Manager, dir, attachmentRoot string) (*Server, error) {
+	uploads, err := attachments.New(attachmentRoot)
+	if err != nil {
+		return nil, err
+	}
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	t, err := template.New("").Funcs(template.FuncMap{
-		"messageLimit": func() int { return limits.MaxMessageUnits },
+		"messageLimit":    func() int { return limits.MaxMessageUnits },
+		"attachmentCount": func() int { return limits.MaxAttachments },
+		"imageBytes":      func() int64 { return limits.MaxImageBytes },
+		"documentBytes":   func() int64 { return limits.MaxDocumentBytes },
+		"attachmentBytes": func() int64 { return limits.MaxAttachmentBytes },
+		"fileSize": func(n int64) string {
+			if n < 1024 {
+				return fmt.Sprintf("%d B", n)
+			}
+			if n < 1024*1024 {
+				return fmt.Sprintf("%.1f KB", float64(n)/1024)
+			}
+			return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+		},
+		"pdfEnabled": func(h string) bool {
+			if h == "claude" {
+				return true
+			}
+			if h == "codex" {
+				_, err := exec.LookPath("pdftotext")
+				return err == nil
+			}
+			return false
+		},
 		"markdown": func(s string) template.HTML {
 			var b bytes.Buffer
 			if md.Convert([]byte(s), &b) != nil {
@@ -102,7 +133,7 @@ func New(m *session.Manager, dir string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: m, templates: t}
+	s := &Server{manager: m, templates: t, uploads: uploads}
 	mux := http.NewServeMux()
 	assets, _ := fs.Sub(files, "assets")
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServerFS(assets)))
@@ -110,6 +141,7 @@ func New(m *session.Manager, dir string) (*Server, error) {
 	mux.HandleFunc("GET /chats/{id}", func(w http.ResponseWriter, r *http.Request) { s.page(w, r, r.PathValue("id"), dir) })
 	mux.HandleFunc("POST /chats", s.create)
 	mux.HandleFunc("POST /chats/{id}/send", s.send)
+	mux.HandleFunc("GET /chats/{id}/attachments/{attachment}", s.attachment)
 	mux.HandleFunc("POST /chats/{id}/stop", s.stop)
 	mux.HandleFunc("POST /chats/{id}/resume", s.resume)
 	mux.HandleFunc("POST /chats/{id}/answer/{item}", s.answer)
@@ -123,7 +155,7 @@ func (s *Server) boundary(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		if r.Method == http.MethodPost {
 			site := r.Header.Get("Sec-Fetch-Site")
 			if site != "" && site != "same-origin" && site != "none" {
@@ -140,6 +172,17 @@ func (s *Server) boundary(next http.Handler) http.Handler {
 					http.Error(w, "Cross-origin actions are not allowed", http.StatusForbidden)
 					return
 				}
+			}
+			media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if media == "multipart/form-data" {
+				parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+				if len(parts) != 3 || parts[0] != "chats" || !attachments.ValidID(parts[1]) || parts[2] != "send" {
+					http.Error(w, "Multipart uploads are only accepted when sending a chat message", http.StatusBadRequest)
+					return
+				}
+				r.Body = http.MaxBytesReader(w, r.Body, limits.MaxUploadBytes)
+				next.ServeHTTP(w, r)
+				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limits.MaxFormBytes)
 			if err := r.ParseForm(); err != nil {
@@ -210,9 +253,6 @@ func (s *Server) action(w http.ResponseWriter, err error) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-func (s *Server) send(w http.ResponseWriter, r *http.Request) {
-	s.action(w, s.manager.Send(r.Context(), r.PathValue("id"), r.FormValue("message")))
 }
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	s.action(w, s.manager.Stop(r.Context(), r.PathValue("id")))

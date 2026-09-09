@@ -28,7 +28,7 @@ type Model struct {
 type Session interface {
     Ref() string                                  // native session reference to persist
     Model() string                                // effective native model id; the manager pins it on the chat
-    Send(ctx context.Context, text string) error  // start a turn
+    Send(ctx context.Context, input Input) error  // start a turn
     Stop(ctx context.Context) error               // interrupt the active turn
     Respond(ctx context.Context, requestID string, answer Answer) error // approval / question reply
     Events() <-chan Event                         // normalized stream
@@ -55,3 +55,11 @@ Model catalogs come from the CLI, never from a hard-coded list: Codex answers `m
 Claude caveat: the `control_request` / `control_response` protocol is what the official Agent SDK uses under the hood; the CLI reference documents only `--permission-prompt-tool` with an MCP tool. Verified against Claude Code 2.1.263 with recorded fixtures in `internal/adapter/claude/testdata`. Pin the CLI version and re-record when it changes. Same discipline as Codex app-server.
 
 Permission and question shapes differ per harness. Normalize to `approval_requested` (yes/no/always) and `question_asked` (free-form or options), and let each adapter decide which it emits.
+
+### Attachments
+
+`adapter.Input` contains `Text` and an ordered `[]Attachment`. Attachments carry a server-generated ID, original name, validated media type, byte size, and an absolute host `Path`. Only the dispatch input contains the path; its `json:"-"` tag excludes it from persisted metadata. Resolve stored files through the attachment store using the chat ID and attachment ID.
+
+Codex sends images as `localImage` input items. Claude reads the stored image and sends a base64 image block. Image-only input is supported. Document references are added to the prompt as quoted names and absolute paths; the agent reads them with its tools. Codex PDF attachments require `pdftotext` on the host. Claude reads PDFs with its native Read tool. Paths outside the working directory may require approval; do not broaden sandbox permissions automatically.
+
+Native frame readers allow 40 MiB because an echoed image input can exceed the former 16 MiB bound after base64 encoding. Application upload limits remain smaller and live in `internal/limits`.
