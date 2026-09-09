@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -167,6 +169,12 @@ func (m *Manager) listLocked() []store.Chat {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out
+}
+
+// Harnesses lists the configured agent harness keys in sorted order.
+func (m *Manager) Harnesses() []string {
+	keys := slices.Sorted(maps.Keys(m.adapters))
+	return keys
 }
 func (m *Manager) View(id string) ([]store.Chat, *store.Chat) {
 	m.mu.Lock()

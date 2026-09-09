@@ -72,7 +72,7 @@ func TestMutationOriginBoundary(t *testing.T) {
 }
 func TestMarkdownEscapesHTMLAndUnsafeLinks(t *testing.T) {
 	s, _ := testServer(t)
-	html := s.render("item", store.Item{ID: "safe", Kind: "assistant", Status: "done", Body: "<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n\n**safe**"})
+	html := s.render("item", itemView{store.Item{ID: "safe", Kind: "assistant", Status: "done", Body: "<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n\n**safe**"}, "codex"})
 	if strings.Contains(html, "<script>") || strings.Contains(html, `href="javascript:`) {
 		t.Fatal("unsafe markdown")
 	}

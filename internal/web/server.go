@@ -35,6 +35,13 @@ type page struct {
 	Chats     []store.Chat
 	Chat      *store.Chat
 	Directory string
+	Harnesses []string
+}
+
+// itemView pairs an item with the harness of its chat so the template can label it.
+type itemView struct {
+	store.Item
+	Harness string
 }
 type fragment struct {
 	ID   string  `json:"id"`
@@ -48,6 +55,9 @@ type stream struct {
 	Items        []fragment `json:"items"`
 }
 
+// harnessNames maps harness keys to display names; keys must match the SVG sprite ids in app.html.
+var harnessNames = map[string]string{"codex": "Codex", "claude": "Claude Code", "gemini": "Gemini CLI"}
+
 func New(m *session.Manager, dir string) (*Server, error) {
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	t, err := template.New("").Funcs(template.FuncMap{
@@ -60,6 +70,19 @@ func New(m *session.Manager, dir string) (*Server, error) {
 			return template.HTML(b.String())
 		}, // Goldmark disables raw HTML and unsafe links.
 		"timeLabel": func(t time.Time) string { return t.Local().Format("15:04") },
+		"itemView":  func(i store.Item, harness string) itemView { return itemView{i, harness} },
+		"harnessName": func(s string) string {
+			if name, ok := harnessNames[s]; ok {
+				return name
+			}
+			return s
+		},
+		"harnessIcon": func(s string) string {
+			if _, ok := harnessNames[s]; ok {
+				return "h-" + s
+			}
+			return "h-agent"
+		},
 		"decision": func(s string) string {
 			switch s {
 			case "accept":
@@ -139,7 +162,6 @@ func (s *Server) live(data page) string {
 	if data.Chat != nil {
 		title := template.HTMLEscapeString(data.Chat.Title)
 		markup += `<span id="breadcrumb-title" class="chat-title" hx-swap-oob="true">` + title + `</span>`
-		markup += `<h1 id="chat-name" hx-swap-oob="true">` + title + `</h1>`
 		markup += strings.Replace(s.render("status", data.Chat), `id="chat-status"`, `id="chat-status" hx-swap-oob="true"`, 1)
 		markup += strings.Replace(s.render("controls", data.Chat), `id="turn-controls"`, `id="turn-controls" hx-swap-oob="true"`, 1)
 	}
@@ -157,10 +179,14 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, id, dir string) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(s.render(name, page{chats, chat, dir})))
+	_, _ = w.Write([]byte(s.render(name, page{Chats: chats, Chat: chat, Directory: dir, Harnesses: s.manager.Harnesses()})))
 }
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
-	id, err := s.manager.Create(r.Context(), "codex", r.FormValue("directory"), adapter.PermissionMode(r.FormValue("mode")))
+	harness := r.FormValue("harness")
+	if harness == "" {
+		harness = "codex"
+	}
+	id, err := s.manager.Create(r.Context(), harness, r.FormValue("directory"), adapter.PermissionMode(r.FormValue("mode")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -245,7 +271,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				}
 				for _, key := range order {
 					i := latest[key]
-					f := fragment{ID: i.ID, HTML: s.render("item", i)}
+					f := fragment{ID: i.ID, HTML: s.render("item", itemView{i, chat.Harness})}
 					if i.Kind == "assistant" && i.Status == "streaming" {
 						body := i.Body
 						f.Text = &body
