@@ -6,22 +6,23 @@ Read `PROJECT.md` first for scope: single-user tool, Tailscale is the access con
 
 ## Commands
 
-Requires Go 1.26+, [Task](https://taskfile.dev/), Node.js (for one JS test), and Codex CLI for live use.
+Requires Go 1.26+, [Task](https://taskfile.dev/), Node.js (for one JS test), and Codex CLI and/or Claude Code CLI for live use.
 
 ```sh
 task build                    # bin/hypercode, single binary with embedded assets
 task dev                      # go run ./cmd/hypercode
 task test                     # go test -race ./... + node --test internal/web/browser_test.cjs
 task lint                     # gofmt check (internal/checkformat) + go vet
-task dev-fixture -- -addr 127.0.0.1:8091   # offline Codex peer, isolated history in .cache/fixture
+task dev-fixture -- -addr 127.0.0.1:8091   # offline Codex and Claude peers, isolated history in .cache/fixture
 
 go test -race ./internal/session/ -run TestProcessLossAndColdResume   # one test
 go run ./cmd/codex-spike -dir /tmp                                    # live protocol check against real Codex
+go run ./cmd/claude-spike -dir /tmp -record output/live.jsonl         # same for Claude Code; -record captures raw traffic
 ```
 
 `task lint` fails on any unformatted Go file, so run `gofmt -w` before finishing.
 
-The fixture server (`dev-fixture`) is how UI work is checked without model calls. Messages containing `[approval]`, `[question]`, `[wait]`, `[reject]`, or `[crash]` trigger those flows; anything else returns a Markdown sample. With Playwright CLI attached to it, `internal/web/browser-regressions.js` is the manual browser regression script. Delete `.cache/fixture` afterwards if you created chats.
+The fixture server (`dev-fixture`) is how UI work is checked without model calls. Both fake peers understand `[approval]`, `[question]`, `[wait]`, `[noise]`, and `[crash]` in a message; Codex also `[reject]`, Claude also `[cancel]`; anything else returns a Markdown sample. With Playwright CLI attached to it, `internal/web/browser-regressions.js` is the manual browser regression script. Delete `.cache/fixture` afterwards if you created chats.
 
 ## Architecture
 
@@ -33,9 +34,9 @@ One Go binary. No frontend build step. HTMX 4.0.0 is vendored in `internal/web/a
 
 **Restart semantics.** `store.Open` marks every `running` session and every `streaming`/`pending` item `interrupted` at startup. Nothing auto-resumes. `Resume` on the adapter is a separate verb from `Open` and must work cold, with the old process gone. A chat that never sent a message opens a fresh native thread on resume instead. Replies to prompts whose process died are rejected ("expired or already answered").
 
-**Harnesses.** `store.Chat.Harness` is the key into the adapter map built in `cmd/hypercode/main.go`. Only `codex` is registered today. Adding one means: implement `adapter.Adapter` + `adapter.Session` in `internal/adapter/<name>`, register it in `main.go`, add its display name to `harnessNames` in `internal/web/server.go`, and add a matching `<symbol id="h-<name>">` to the `icons` template in `app.html`. `Manager.Harnesses()` drives the new-chat select, so no other UI change is needed. Native wire formats never leave the adapter package.
+**Harnesses.** `store.Chat.Harness` is the key into the adapter map built in `cmd/hypercode/main.go`. `codex` (`internal/adapter/codex`, app-server JSON-RPC) and `claude` (`internal/adapter/claude`, stream-json with `control_request`/`control_response`) are registered. Adding one means: implement `adapter.Adapter` + `adapter.Session` in `internal/adapter/<name>`, register it in `main.go`, add its display name to `harnessNames` in `internal/web/server.go`, and add a matching `<symbol id="h-<name>">` to the `icons` template in `app.html`. `Manager.Harnesses()` drives the new-chat select, so no other UI change is needed. `Adapter.Models` supplies the model catalog; the manager loads it once at startup in the background (`loadModels`), `store.Chat.Model` stores the chosen id, pinned from `Session.Model()` when the user picked the agent default, and it is passed back on `Open`/`Resume`. Native wire formats never leave the adapter package.
 
-**Template contract with `app.js`.** The JS depends on these ids and attributes staying stable: `#workspace[data-chat]`, `#conversation`, `#empty-conversation`, `#item-<id> .message-body`, `#message-form`, `#message`, `#turn-controls[data-ready]`, `#connection` (text set to "Connected"/"Reconnecting…", class `online`), `#app-error`, `#chat-list`, `#breadcrumb-title`, `#chat-status`, `.new-chat` (the `N` shortcut), `[data-free-answer]`, `.item[data-status]`. `Server.live()` emits `hx-swap-oob` fragments for the chat list, breadcrumb, status, and controls. Items are rendered through `itemView` (item + chat harness), not bare `store.Item`.
+**Template contract with `app.js`.** The JS depends on these ids and attributes staying stable: `#workspace[data-chat]`, `#conversation`, `#empty-conversation`, `#item-<id> .message-body`, `#message-form`, `#message`, `#turn-controls[data-ready]`, `#connection` (text set to "Connected"/"Reconnecting…", class `online`), `#app-error`, `#chat-list`, `#breadcrumb-title`, `#chat-status`, `.new-chat` (the `N` shortcut), `#harness` and `.model-select[data-harness]` in the new-chat form (one select per agent; JS shows and enables only the chosen agent's select), `[data-free-answer]`, `.item[data-status]`. `Server.live()` emits `hx-swap-oob` fragments for the chat list, breadcrumb, status, and controls. Items are rendered through `itemView` (item + chat harness), not bare `store.Item`.
 
 **Streaming rule.** Only the in-progress assistant message is patched by JS (text deltas batched every 75 ms). Completed messages are re-rendered server-side as Markdown (Goldmark, raw HTML off) and swapped whole. Never replace the conversation container mid-stream except on a snapshot.
 
@@ -44,9 +45,9 @@ One Go binary. No frontend build step. HTMX 4.0.0 is vendored in `internal/web/a
 ## Testing conventions
 
 - Adapter tests replay recorded fixtures in `internal/adapter/codex/testdata` through the decoder, and drive a fake process for bidirectional RPC. No live model in unit tests. Recordings are redacted; raw captures go to the ignored `output/` directory.
-- `internal/testcodex` is the deterministic app-server peer used by `dev-fixture` and integration tests.
+- `internal/testcodex` and `internal/testclaude` are the deterministic peers used by `dev-fixture` and integration tests. Adapter tests re-exec the test binary as the peer (`TestProtocolProcess`).
 - Wait on events, never on sleeps. A test that needs a timeout to pass is wrong.
-- The protocol was verified against codex-cli 0.153.4; it can change across CLI releases. When it does, update `docs/protocol.md` and re-record fixtures via `cmd/codex-spike -record`.
+- Protocols were verified against codex-cli 0.153.4 and Claude Code 2.1.263; they can change across CLI releases. When they do, update `docs/protocol.md` and re-record fixtures via `cmd/codex-spike -record` / `cmd/claude-spike -record`, redacting ids and paths as described there.
 
 ## UI conventions
 

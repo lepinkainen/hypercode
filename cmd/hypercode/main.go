@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/lepinkainen/hypercode/internal/adapter"
+	"github.com/lepinkainen/hypercode/internal/adapter/claude"
 	"github.com/lepinkainen/hypercode/internal/adapter/codex"
 	"github.com/lepinkainen/hypercode/internal/session"
 	"github.com/lepinkainen/hypercode/internal/store"
@@ -37,6 +38,7 @@ func run() error {
 	addr := flag.String("addr", "127.0.0.1:8090", "Loopback or Tailscale IP and port")
 	data := flag.String("data-dir", filepath.Join(config, "hypercode"), "Persistent data directory")
 	executable := flag.String("codex", "codex", "Codex executable path")
+	claudeExecutable := flag.String("claude", "claude", "Claude Code executable path")
 	flag.Parse()
 	if err = validateAddress(*addr); err != nil {
 		return err
@@ -49,7 +51,7 @@ func run() error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	m, err := session.New(db, map[string]adapter.Adapter{"codex": codex.Adapter{Executable: *executable}})
+	m, err := session.New(db, map[string]adapter.Adapter{"codex": codex.Adapter{Executable: *executable}, "claude": claude.Adapter{Executable: *claudeExecutable}})
 	if err != nil {
 		return err
 	}
@@ -75,7 +77,7 @@ func run() error {
 	server := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
-	slog.Info("Hypercode is ready", "url", "http://"+listener.Addr().String(), "data", *data, "codex", *executable)
+	slog.Info("Hypercode is ready", "url", "http://"+listener.Addr().String(), "data", *data, "codex", *executable, "claude", *claudeExecutable)
 	select {
 	case <-ctx.Done():
 	case err = <-done:

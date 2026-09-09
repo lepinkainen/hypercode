@@ -27,11 +27,44 @@ type Adapter struct {
 	Trace io.Writer
 }
 
-func (a Adapter) Open(ctx context.Context, dir string, mode adapter.PermissionMode) (adapter.Session, error) {
-	return a.connect(ctx, dir, "", mode)
+func (a Adapter) Open(ctx context.Context, dir string, mode adapter.PermissionMode, model string) (adapter.Session, error) {
+	return a.connect(ctx, dir, "", mode, model)
 }
-func (a Adapter) Resume(ctx context.Context, dir, ref string, mode adapter.PermissionMode) (adapter.Session, error) {
-	return a.connect(ctx, dir, ref, mode)
+func (a Adapter) Resume(ctx context.Context, dir, ref string, mode adapter.PermissionMode, model string) (adapter.Session, error) {
+	return a.connect(ctx, dir, ref, mode, model)
+}
+
+// Models asks a short-lived app-server for the account's model catalog.
+func (a Adapter) Models(ctx context.Context) ([]adapter.Model, error) {
+	s, err := a.start(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = s.Close() }()
+	var result struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"displayName"`
+			Description string `json:"description"`
+			Hidden      bool   `json:"hidden"`
+			IsDefault   bool   `json:"isDefault"`
+		} `json:"data"`
+	}
+	if err = s.call(ctx, "model/list", map[string]any{"limit": 100}, &result); err != nil {
+		return nil, err
+	}
+	var models []adapter.Model
+	for _, m := range result.Data {
+		if m.Hidden || m.ID == "" {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			name = m.ID
+		}
+		models = append(models, adapter.Model{ID: m.ID, Name: name, Description: m.Description, Default: m.IsDefault})
+	}
+	return models, nil
 }
 
 type packet struct {
@@ -62,6 +95,7 @@ type session struct {
 	calls     map[string]chan packet
 	requests  map[string]pendingRequest
 	ref       string
+	model     string
 	turn      string
 	next      atomic.Uint64
 	events    chan adapter.Event
@@ -93,10 +127,8 @@ func (b *tailBuffer) String() string {
 	return strings.TrimSpace(b.text)
 }
 
-func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.PermissionMode) (adapter.Session, error) {
-	if !mode.Valid() {
-		return nil, errors.New("invalid permission mode")
-	}
+// start spawns the app-server and completes the initialize handshake.
+func (a Adapter) start(ctx context.Context, dir string) (*session, error) {
 	exe := a.Executable
 	if exe == "" {
 		exe = "codex"
@@ -119,13 +151,25 @@ func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.Perm
 		return nil, fmt.Errorf("start Codex: %w. Install Codex and run codex login on this host", err)
 	}
 	go s.read(stdout)
-	fail := func(err error) (adapter.Session, error) { _ = s.Close(); return nil, err }
 	if err = s.call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "hypercode", "title": "Hypercode", "version": "0.1.0"}, "capabilities": map[string]bool{"experimentalApi": true}}, nil); err != nil {
-		return fail(err)
+		_ = s.Close()
+		return nil, err
 	}
 	if err = s.write(map[string]any{"method": "initialized"}); err != nil {
-		return fail(err)
+		_ = s.Close()
+		return nil, err
 	}
+	return s, nil
+}
+func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.PermissionMode, model string) (adapter.Session, error) {
+	if !mode.Valid() {
+		return nil, errors.New("invalid permission mode")
+	}
+	s, err := a.start(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (adapter.Session, error) { _ = s.Close(); return nil, err }
 	sandbox := string(mode)
 	policy := "on-request"
 	if mode == adapter.FullAccess {
@@ -133,6 +177,9 @@ func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.Perm
 		policy = "never"
 	}
 	params := map[string]any{"cwd": dir, "sandbox": sandbox, "approvalPolicy": policy, "approvalsReviewer": "user"}
+	if model != "" {
+		params["model"] = model
+	}
 	method := "thread/start"
 	if ref != "" {
 		method = "thread/resume"
@@ -141,8 +188,10 @@ func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.Perm
 	}
 	var result struct {
 		Thread struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			Model string `json:"model"`
 		} `json:"thread"`
+		Model string `json:"model"`
 	}
 	if err = s.call(ctx, method, params, &result); err != nil {
 		return fail(err)
@@ -152,10 +201,18 @@ func (a Adapter) connect(ctx context.Context, dir, ref string, mode adapter.Perm
 	}
 	s.mu.Lock()
 	s.ref = result.Thread.ID
+	s.model = result.Model
+	if s.model == "" {
+		s.model = result.Thread.Model
+	}
+	if s.model == "" {
+		s.model = model
+	}
 	s.mu.Unlock()
 	return s, nil
 }
 func (s *session) Ref() string                  { s.mu.Lock(); defer s.mu.Unlock(); return s.ref }
+func (s *session) Model() string                { s.mu.Lock(); defer s.mu.Unlock(); return s.model }
 func (s *session) Events() <-chan adapter.Event { return s.events }
 func (s *session) write(v any) error {
 	s.writeMu.Lock()

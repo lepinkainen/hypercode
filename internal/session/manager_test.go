@@ -18,30 +18,40 @@ type fakeAdapter struct {
 	mu      sync.Mutex
 	last    *fakeSession
 	resumed string
+	model   string
 	openErr error
 }
 type fakeSession struct {
+	model     string
 	events    chan adapter.Event
 	once      sync.Once
 	responses int
 	send      func(context.Context) error
 }
 
-func (f *fakeAdapter) Open(context.Context, string, adapter.PermissionMode) (adapter.Session, error) {
+func (f *fakeAdapter) Models(context.Context) ([]adapter.Model, error) {
+	return []adapter.Model{{ID: "", Name: "Default", Default: true}, {ID: "fake-fast", Name: "Fake Fast", Description: "Quick answers"}}, nil
+}
+func (f *fakeAdapter) Open(_ context.Context, _ string, _ adapter.PermissionMode, model string) (adapter.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.model = model
 	if f.openErr != nil {
 		return nil, f.openErr
 	}
-	s := &fakeSession{events: make(chan adapter.Event, 1024)}
+	if model == "" {
+		model = "fake-resolved"
+	}
+	s := &fakeSession{model: model, events: make(chan adapter.Event, 1024)}
 	f.last = s
 	return s, nil
 }
-func (f *fakeAdapter) Resume(ctx context.Context, dir, ref string, mode adapter.PermissionMode) (adapter.Session, error) {
+func (f *fakeAdapter) Resume(ctx context.Context, dir, ref string, mode adapter.PermissionMode, model string) (adapter.Session, error) {
 	f.resumed = ref
-	return f.Open(ctx, dir, mode)
+	return f.Open(ctx, dir, mode, model)
 }
-func (f *fakeSession) Ref() string { return "native-ref" }
+func (f *fakeSession) Ref() string   { return "native-ref" }
+func (f *fakeSession) Model() string { return f.model }
 func (f *fakeSession) Send(ctx context.Context, _ string) error {
 	if f.send != nil {
 		return f.send(ctx)
@@ -90,7 +100,7 @@ func awaitChat(t *testing.T, m *Manager, id string, predicate func(*store.Chat) 
 }
 func TestStreamApprovalStopAndReplay(t *testing.T) {
 	m, a := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.WorkspaceWrite)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.WorkspaceWrite, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +146,7 @@ func TestStreamApprovalStopAndReplay(t *testing.T) {
 }
 func TestSlowSubscriberSnapshotFallback(t *testing.T) {
 	m, a := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +176,7 @@ func TestProcessLossAndColdResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +225,7 @@ func TestCreateValidation(t *testing.T) {
 		agent, dir string
 		mode       adapter.PermissionMode
 	}{{"claude", t.TempDir(), adapter.ReadOnly}, {"codex", "relative", adapter.ReadOnly}, {"codex", t.TempDir(), "bad"}} {
-		if _, err := m.Create(t.Context(), tt.agent, tt.dir, tt.mode); err == nil {
+		if _, err := m.Create(t.Context(), tt.agent, tt.dir, tt.mode, ""); err == nil {
 			t.Fatal(errors.New("invalid chat accepted"))
 		}
 	}
@@ -223,7 +233,7 @@ func TestCreateValidation(t *testing.T) {
 
 func TestDisconnectDuringSendDoesNotCancelTurn(t *testing.T) {
 	m, a := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +256,7 @@ func TestDisconnectDuringSendDoesNotCancelTurn(t *testing.T) {
 
 func TestResolvedRequestBecomesInterrupted(t *testing.T) {
 	m, a := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +277,7 @@ func TestSendFailureKeepsLiveSession(t *testing.T) {
 	}{{"rejected", &adapter.RejectedError{Err: errors.New("request rejected")}, "idle"}, {"timeout", context.DeadlineExceeded, "running"}} {
 		t.Run(tt.name, func(t *testing.T) {
 			m, a := setup(t)
-			id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+			id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -302,7 +312,7 @@ func TestSendFailureKeepsLiveSession(t *testing.T) {
 
 func TestEmptyChatRetryIgnoresErrorHistory(t *testing.T) {
 	m, a := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +339,7 @@ func TestMessageLimitMatchesBrowserUTF16(t *testing.T) {
 	}{{"ASCII", strings.Repeat("+", 100000), true}, {"BMP", strings.Repeat("界", 100000), true}, {"astral", strings.Repeat("😀", 50000), true}, {"too long", strings.Repeat("😀", 50001), false}} {
 		t.Run(tt.name, func(t *testing.T) {
 			m, _ := setup(t)
-			id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+			id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -357,7 +367,7 @@ func (s *observedStore) Save(c store.Chat) error {
 
 func TestPersistenceIsIncrementalAndDoesNotBlockViews(t *testing.T) {
 	m, _ := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +426,7 @@ func TestPersistenceIsIncrementalAndDoesNotBlockViews(t *testing.T) {
 
 func TestFailedSaveRetriesLatestItem(t *testing.T) {
 	m, _ := setup(t)
-	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly)
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +481,7 @@ func TestCloseWaitsForChatBeingSaved(t *testing.T) {
 	m.mu.Unlock()
 	dir := t.TempDir()
 	created := make(chan error, 1)
-	go func() { _, err := m.Create(t.Context(), "codex", dir, adapter.ReadOnly); created <- err }()
+	go func() { _, err := m.Create(t.Context(), "codex", dir, adapter.ReadOnly, ""); created <- err }()
 	<-entered
 	closed := make(chan struct{})
 	go func() { _ = m.Close(); close(closed) }()
@@ -486,4 +496,42 @@ func TestCloseWaitsForChatBeingSaved(t *testing.T) {
 		t.Error("created a live chat after shutdown started")
 	}
 	<-closed
+}
+func TestModelSelection(t *testing.T) {
+	m, a := setup(t)
+	defer func() { _ = m.Close() }()
+	m.modelsReady.Wait()
+	if len(m.Models("codex")) != 2 || m.ModelName("codex", "fake-fast") != "Fake Fast" || m.ModelName("codex", "") != "Default" || m.ModelName("codex", "gone") != "gone" {
+		t.Fatalf("catalog=%+v", m.Models("codex"))
+	}
+	if _, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "not-a-model"); err == nil {
+		t.Fatal("unknown model accepted")
+	}
+	pinnedID, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, c := m.View(pinnedID); c.Model != "fake-resolved" {
+		t.Fatalf("default not pinned to the effective model: %q", c.Model)
+	}
+	id, err := m.Create(t.Context(), "codex", t.TempDir(), adapter.ReadOnly, "fake-fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.model != "fake-fast" {
+		t.Fatalf("adapter opened with model %q", a.model)
+	}
+	_, c := m.View(id)
+	if c.Model != "fake-fast" {
+		t.Fatalf("chat model=%q", c.Model)
+	}
+	a.model = ""
+	_ = a.last.Close()
+	awaitChat(t, m, id, func(c *store.Chat) bool { return !c.Live })
+	if err = m.Resume(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if a.model != "fake-fast" {
+		t.Fatalf("resume dropped model: %q", a.model)
+	}
 }

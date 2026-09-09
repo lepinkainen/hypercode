@@ -22,6 +22,7 @@ type Chat struct {
 	NativeRef string
 	Title     string
 	Mode      adapter.PermissionMode
+	Model     string // Native model id; empty means the harness default.
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -63,9 +64,36 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = addColumn(db, "sessions", "model", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
+
+// addColumn is the schema migration primitive: SQLite has no IF NOT EXISTS for columns.
+func addColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	return err
+}
 
 // Save upserts session metadata and the supplied items. Items omitted from c
 // remain unchanged, so callers can persist only the items changed since a save.
@@ -82,7 +110,7 @@ func (s *Store) Save(c Chat) error {
 	if err = tx.QueryRow(`SELECT id FROM projects WHERE directory=?`, c.Directory).Scan(&projectID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET native_ref=excluded.native_ref,title=excluded.title,status=excluded.status,updated_at=excluded.updated_at`, c.ID, projectID, c.Harness, c.NativeRef, c.Title, c.Mode, c.Status, c.CreatedAt.Format(time.RFC3339Nano), c.UpdatedAt.Format(time.RFC3339Nano))
+	_, err = tx.Exec(`INSERT INTO sessions(id,project_id,harness,native_ref,title,permission_mode,status,created_at,updated_at,model) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET native_ref=excluded.native_ref,title=excluded.title,status=excluded.status,updated_at=excluded.updated_at`, c.ID, projectID, c.Harness, c.NativeRef, c.Title, c.Mode, c.Status, c.CreatedAt.Format(time.RFC3339Nano), c.UpdatedAt.Format(time.RFC3339Nano), c.Model)
 	if err != nil {
 		return err
 	}
@@ -102,7 +130,7 @@ func (s *Store) Save(c Chat) error {
 	return tx.Commit()
 }
 func (s *Store) Load() ([]Chat, error) {
-	rows, err := s.db.Query(`SELECT s.id,s.project_id,p.directory,p.name,s.harness,s.native_ref,s.title,s.permission_mode,s.status,s.created_at,s.updated_at FROM sessions s JOIN projects p ON p.id=s.project_id ORDER BY s.updated_at DESC`)
+	rows, err := s.db.Query(`SELECT s.id,s.project_id,p.directory,p.name,s.harness,s.native_ref,s.title,s.permission_mode,s.status,s.created_at,s.updated_at,s.model FROM sessions s JOIN projects p ON p.id=s.project_id ORDER BY s.updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +138,7 @@ func (s *Store) Load() ([]Chat, error) {
 	for rows.Next() {
 		var c Chat
 		var created, updated string
-		if err = rows.Scan(&c.ID, &c.ProjectID, &c.Directory, &c.Project, &c.Harness, &c.NativeRef, &c.Title, &c.Mode, &c.Status, &created, &updated); err != nil {
+		if err = rows.Scan(&c.ID, &c.ProjectID, &c.Directory, &c.Project, &c.Harness, &c.NativeRef, &c.Title, &c.Mode, &c.Status, &created, &updated, &c.Model); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}

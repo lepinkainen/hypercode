@@ -38,6 +38,9 @@ type Manager struct {
 	persistMu   sync.Mutex
 	db          historyStore
 	adapters    map[string]adapter.Adapter
+	modelsMu    sync.Mutex
+	modelsReady sync.WaitGroup
+	models      map[string][]adapter.Model
 	chats       map[string]*store.Chat
 	runtimes    map[string]*runtime
 	dirty       map[string]bool
@@ -63,13 +66,55 @@ func New(db historyStore, adapters map[string]adapter.Adapter) (*Manager, error)
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &Manager{db: db, adapters: adapters, chats: map[string]*store.Chat{}, runtimes: map[string]*runtime{}, dirty: map[string]bool{}, dirtyItems: map[string]map[string]store.Item{}, generation: store.ID(), subscribers: map[chan struct{}]bool{}, ctx: ctx, cancel: cancel}
+	m := &Manager{db: db, adapters: adapters, models: map[string][]adapter.Model{}, chats: map[string]*store.Chat{}, runtimes: map[string]*runtime{}, dirty: map[string]bool{}, dirtyItems: map[string]map[string]store.Item{}, generation: store.ID(), subscribers: map[chan struct{}]bool{}, ctx: ctx, cancel: cancel}
 	for i := range chats {
 		m.chats[chats[i].ID] = &chats[i]
 	}
 	m.wg.Add(1)
 	go m.flushLoop()
+	for harness, a := range adapters {
+		m.wg.Add(1)
+		m.modelsReady.Add(1)
+		go m.loadModels(harness, a)
+	}
 	return m, nil
+}
+
+// loadModels fills the catalog cache once at startup. A failure leaves the
+// harness at its default model rather than blocking chat creation.
+func (m *Manager) loadModels(harness string, a adapter.Adapter) {
+	defer m.wg.Done()
+	defer m.modelsReady.Done()
+	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
+	defer cancel()
+	models, err := a.Models(ctx)
+	if err != nil {
+		slog.Warn("model catalog unavailable", "harness", harness, "error", err)
+		return
+	}
+	m.modelsMu.Lock()
+	m.models[harness] = models
+	m.modelsMu.Unlock()
+}
+
+// Models returns the cached catalog for a harness; nil until it has loaded.
+func (m *Manager) Models(harness string) []adapter.Model {
+	m.modelsMu.Lock()
+	defer m.modelsMu.Unlock()
+	return m.models[harness]
+}
+
+// ModelName resolves a stored model id to its display name.
+func (m *Manager) ModelName(harness, id string) string {
+	for _, model := range m.Models(harness) {
+		if model.ID == id {
+			return model.Name
+		}
+	}
+	if id == "" {
+		return "default model"
+	}
+	return id
 }
 func (m *Manager) flushLoop() {
 	defer m.wg.Done()
@@ -215,7 +260,7 @@ func (m *Manager) Read(id, generation string, after uint64) (string, uint64, boo
 	}
 	return m.generation, m.seq, snapshot, updates, m.listLocked(), chat
 }
-func (m *Manager) Create(ctx context.Context, harness, dir string, mode adapter.PermissionMode) (string, error) {
+func (m *Manager) Create(ctx context.Context, harness, dir string, mode adapter.PermissionMode, model string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -248,12 +293,24 @@ func (m *Manager) Create(ctx context.Context, harness, dir string, mode adapter.
 	if !info.IsDir() {
 		return "", errors.New("working directory must be a directory")
 	}
-	native, err := a.Open(m.ctx, dir, mode)
+	if models := m.Models(harness); model != "" && len(models) > 0 {
+		known := false
+		for _, candidate := range models {
+			known = known || candidate.ID == model
+		}
+		if !known {
+			return "", errors.New("unknown model for this agent")
+		}
+	}
+	native, err := a.Open(m.ctx, dir, mode, model)
 	if err != nil {
 		return "", err
 	}
+	if pinned := native.Model(); pinned != "" {
+		model = pinned // Defaults drift; the chat keeps the model it started with.
+	}
 	now := time.Now()
-	c := &store.Chat{ID: store.ID(), ProjectID: store.ID(), Project: filepath.Base(dir), Directory: dir, Harness: harness, NativeRef: native.Ref(), Title: "New chat", Mode: mode, Status: "idle", CreatedAt: now, UpdatedAt: now, Live: true}
+	c := &store.Chat{ID: store.ID(), ProjectID: store.ID(), Project: filepath.Base(dir), Directory: dir, Harness: harness, NativeRef: native.Ref(), Title: "New chat", Mode: mode, Model: model, Status: "idle", CreatedAt: now, UpdatedAt: now, Live: true}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -348,7 +405,7 @@ func (m *Manager) Send(ctx context.Context, id, text string) error {
 			return err
 		}
 		var rejected *adapter.RejectedError
-		message := "Could not confirm whether Codex accepted the message: " + err.Error()
+		message := "Could not confirm whether the agent accepted the message: " + err.Error()
 		if errors.As(err, &rejected) {
 			if c.Status == "running" {
 				c.Status = "idle"
@@ -360,7 +417,7 @@ func (m *Manager) Send(ctx context.Context, id, text string) error {
 					break
 				}
 			}
-			message = "Codex rejected the message. You can edit it and retry: " + err.Error()
+			message = "The agent rejected the message. You can edit it and retry: " + err.Error()
 		}
 		// A timeout is not proof of process loss or rejection. Keep the current
 		// state until events report completion or the event stream closes.
@@ -431,9 +488,9 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 		}
 	}
 	if !hasConversation {
-		native, err = a.Open(m.ctx, copy.Directory, copy.Mode)
+		native, err = a.Open(m.ctx, copy.Directory, copy.Mode, copy.Model)
 	} else {
-		native, err = a.Resume(m.ctx, copy.Directory, copy.NativeRef, copy.Mode)
+		native, err = a.Resume(m.ctx, copy.Directory, copy.NativeRef, copy.Mode, copy.Model)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -450,6 +507,9 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 		return errors.New("application is shutting down")
 	}
 	c.NativeRef = native.Ref()
+	if c.Model == "" {
+		c.Model = native.Model()
+	}
 	// Keep the cold-resume reservation while persistence releases mu.
 	if err = m.save(c); err != nil {
 		_ = native.Close()
@@ -551,7 +611,7 @@ func (m *Manager) consume(id string, rt *runtime) {
 		return
 	}
 	m.mu.Unlock()
-	m.fail(id, rt, "Codex disconnected. Resume this chat to continue.")
+	m.fail(id, rt, "The agent disconnected. Resume this chat to continue.")
 }
 func (m *Manager) apply(id string, rt *runtime, e adapter.Event) {
 	m.mu.Lock()

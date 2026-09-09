@@ -19,6 +19,7 @@ func Run(in io.Reader, out io.Writer) error {
 	write := func(v any) { _ = enc.Encode(v) }
 	event := func(method string, params any) { write(map[string]any{"method": method, "params": params}) }
 	ref := "fixture-thread"
+	model := ""
 	turn := 0
 	item := ""
 	waiting := ""
@@ -42,15 +43,22 @@ func Run(in io.Reader, out io.Writer) error {
 		case "initialize":
 			reply(map[string]string{"userAgent": "fixture/0.153.4"})
 		case "initialized":
+		case "model/list":
+			reply(map[string]any{"data": []any{map[string]any{"id": "fixture-large", "displayName": "Fixture Large", "description": "The default fixture model.", "isDefault": true}, map[string]any{"id": "fixture-small", "displayName": "Fixture Small", "description": "A faster fixture model."}, map[string]any{"id": "fixture-hidden", "displayName": "Hidden", "hidden": true}}})
 		case "thread/start", "thread/resume":
 			var args struct {
 				ThreadID string `json:"threadId"`
+				Model    string `json:"model"`
 			}
 			_ = json.Unmarshal(p.Params, &args)
 			if args.ThreadID != "" {
 				ref = args.ThreadID
 			}
-			reply(map[string]any{"thread": map[string]string{"id": ref}})
+			model = args.Model
+			if model == "" {
+				model = "fixture-large"
+			}
+			reply(map[string]any{"thread": map[string]string{"id": ref, "model": model}, "model": model})
 		case "turn/start":
 			var args struct {
 				Input []struct {
@@ -91,7 +99,7 @@ func Run(in io.Reader, out io.Writer) error {
 				waiting = "wait"
 				event("item/agentMessage/delta", map[string]any{"threadId": ref, "itemId": item, "delta": "Working on your task. This turn waits for Stop."})
 			default:
-				finish("I explored the project.\n\n## Ready to build\n\n- **Codex streaming** is connected.\n- History stays on this host.\n\n```go\nfmt.Println(\"Hello, Hypercode\")\n```", "completed")
+				finish("I explored the project.\n\n## Ready to build\n\n- **Codex streaming** is connected (model: "+model+").\n- History stays on this host.\n\n```go\nfmt.Println(\"Hello, Hypercode\")\n```", "completed")
 			}
 		case "turn/interrupt":
 			reply(map[string]any{})

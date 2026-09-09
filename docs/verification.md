@@ -37,3 +37,14 @@ The headed Chromium browser exercised the actual embedded UI against the offline
 The refreshed UI reported no console errors. Expected connection failures occurred while the service was deliberately stopped. Screenshots and local browser snapshots are in ignored `output/playwright/` and `.playwright-cli/` directories.
 
 A remote Tailscale host, VM reboot, and systemd deployment were not exercised locally. The deployment document includes the remaining host checks.
+
+## Native Claude Code checks
+
+Verified on 2026-09-09 with Claude Code 2.1.263 through `cmd/claude-spike`:
+
+- Opened a fresh session with a generated `--session-id`, streamed a text reply, and received a completed result.
+- Requested a Bash command in read-only mode. The command appeared as a `can_use_tool` control request with permission suggestions; a denial produced an `is_error` tool result and the model reported the denial. An allow-listed command from the user's Claude settings ran without a prompt.
+- Triggered `AskUserQuestion`; the answer keyed by question text was accepted and echoed back. A question with fewer than two options was rejected by the CLI itself.
+- Interrupted a response after its first text delta. The result carried `terminal_reason: aborted_streaming`.
+- Resumed the approval session cold with `--resume`; the model recalled the denied command.
+- Resumed an unknown session id; the process exited before answering `initialize` and the open failed with the CLI's message.

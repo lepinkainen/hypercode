@@ -13,14 +13,15 @@ tasks:
     cmds:
       - go run ./cmd/hypercode {{.CLI_ARGS}}
   test-peer:
-    desc: Build the offline Codex protocol fixture peer
+    desc: Build the offline Codex and Claude Code protocol fixture peers
     cmds:
       - go build -o bin/testcodex ./internal/testcodex/cmd
+      - go build -o bin/testclaude ./internal/testclaude/cmd
   dev-fixture:
     desc: Run with an offline agent and isolated history
     deps: [build, test-peer]
     cmds:
-      - bin/hypercode -codex '{{.ROOT_DIR}}/bin/testcodex' -data-dir '{{.ROOT_DIR}}/.cache/fixture' {{.CLI_ARGS}}
+      - bin/hypercode -codex '{{.ROOT_DIR}}/bin/testcodex' -claude '{{.ROOT_DIR}}/bin/testclaude' -data-dir '{{.ROOT_DIR}}/.cache/fixture' {{.CLI_ARGS}}
   test:
     cmds:
       - go test -race ./...

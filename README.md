@@ -1,19 +1,19 @@
 # Hypercode
 
-A private web workspace for the Codex CLI. One Go binary embeds the UI and stores conversation history in SQLite. Codex runs on the host, so closing the browser does not stop a turn.
+A private web workspace for installed coding agents: Codex CLI and Claude Code. One Go binary embeds the UI and stores conversation history in SQLite. The agent runs on the host, so closing the browser does not stop a turn.
 
-This first version supports **Codex only**. The adapter contract and agent registry allow other agents to be added without changing storage or the session manager.
+This version supports **Codex** and **Claude Code**. The adapter contract and agent registry allow other agents to be added without changing storage or the session manager.
 
 ## Run
 
-Install Go 1.26 or newer, [Task](https://taskfile.dev/), and Codex. Authenticate with `codex login` on the host, then:
+Install Go 1.26 or newer, [Task](https://taskfile.dev/), and at least one agent CLI. Authenticate with `codex login` and/or `claude auth login` on the host, then:
 
 ```sh
 task build
 ./bin/hypercode
 ```
 
-Open <http://127.0.0.1:8090>. Create a chat with an absolute project directory and a permission mode. The model comes from your Codex configuration.
+Open <http://127.0.0.1:8090>. Create a chat with an agent, a model, an absolute project directory, and a permission mode. The model list comes from the agent CLI itself; "default" leaves the choice to the agent's own configuration. The model is fixed for the life of a chat and shown in the sidebar and header. Executable paths can be overridden with `-codex` and `-claude`.
 
 ```sh
 ./bin/hypercode \
@@ -22,21 +22,21 @@ Open <http://127.0.0.1:8090>. Create a chat with an absolute project directory a
   -codex /absolute/path/to/codex
 ```
 
-The default data directory is `hypercode` under the OS user configuration directory. Run under the same OS user as your projects and Codex login. No OpenAI API key is required by Hypercode itself.
+The default data directory is `hypercode` under the OS user configuration directory. Run under the same OS user as your projects and agent logins. No API key is required by Hypercode itself.
 
 ## Included
 
 - Recent chats, project directories, and per-chat permissions.
 - Streamed assistant text, safe Markdown rendering, and expandable tool activity.
-- Inline command/file approvals and structured Codex questions.
+- Inline command/file approvals and structured questions from both agents.
 - Stop and explicit resume. One active turn per chat.
 - SQLite history, partial output persistence, browser refresh survival, and SSE reconnection.
-- Recovery after Codex exits or Hypercode restarts. Stale prompts become interrupted and reject replies.
+- Recovery after the agent exits or Hypercode restarts. Stale prompts become interrupted and reject replies.
 - Same-origin checks for POST actions. The listener accepts loopback or Tailscale address ranges.
 
-Workspace write permits changes inside the project and asks Codex to request approval for escalation. Read only starts a read-only sandbox. Full access disables sandboxing and approval prompts. Only decisions supported by the current approval request are offered; permanent policy amendments are not implemented.
+For Codex, workspace write permits changes inside the project and asks for approval on escalation, read only starts a read-only sandbox, and full access disables sandboxing and approval prompts. For Claude Code, the modes map to `acceptEdits`, `default`, and `bypassPermissions`; Claude has no sandbox, so read only means every write and command prompts unless your Claude settings already allow it. Only decisions supported by the current approval request are offered; permanent policy amendments are not implemented.
 
-A restart interrupts active work. Use **Resume chat** to reattach to the stored Codex thread, then send the next message. Resume never automatically repeats the previous prompt. An empty chat that has never sent a message opens a new native thread because Codex may not have persisted the original yet.
+A restart interrupts active work. Use **Resume chat** to reattach to the stored native session, then send the next message. Resume never automatically repeats the previous prompt. An empty chat that has never sent a message opens a new native session because the agent may not have persisted the original yet.
 
 ## Development
 
@@ -81,6 +81,7 @@ The spike also accepts `-prompt`, `-mode`, `-approve`, and `-interrupt`. Raw tra
 | `cmd/codex-spike` | Standalone native protocol verification |
 | `internal/adapter` | Common session/event contract |
 | `internal/adapter/codex` | Process ownership and Codex stdio JSON-RPC |
+| `internal/adapter/claude` | Process ownership and Claude Code stream-json control protocol |
 | `internal/session` | Turn lifecycle, live state, event replay |
 | `internal/store` | SQLite UI history |
 | `internal/web` | HTTP actions, SSE, embedded templates/assets |

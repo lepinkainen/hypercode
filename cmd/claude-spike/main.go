@@ -1,4 +1,4 @@
-// codex-spike verifies an installed CLI without the web UI and can record traffic.
+// claude-spike verifies an installed CLI without the web UI and can record traffic.
 package main
 
 import (
@@ -10,7 +10,7 @@ import (
 	"os/signal"
 
 	"github.com/lepinkainen/hypercode/internal/adapter"
-	"github.com/lepinkainen/hypercode/internal/adapter/codex"
+	"github.com/lepinkainen/hypercode/internal/adapter/claude"
 )
 
 func main() {
@@ -21,9 +21,9 @@ func main() {
 }
 func run() error {
 	cwd, _ := os.Getwd()
-	executable := flag.String("codex", "codex", "Codex executable")
+	executable := flag.String("claude", "claude", "Claude Code executable")
 	dir := flag.String("dir", cwd, "Working directory")
-	ref := flag.String("resume", "", "Native thread reference to resume")
+	ref := flag.String("resume", "", "Native session reference to resume")
 	prompt := flag.String("prompt", "Reply with exactly: Hypercode connected. Do not use tools.", "Prompt to send")
 	record := flag.String("record", "", "Write raw JSONL traffic to this file")
 	mode := flag.String("mode", "read-only", "read-only, workspace-write, or full-access")
@@ -43,7 +43,7 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	a := codex.Adapter{Executable: *executable, Trace: trace}
+	a := claude.Adapter{Executable: *executable, Trace: trace}
 	if *listModels {
 		models, err := a.Models(ctx)
 		if err != nil {
@@ -69,7 +69,7 @@ func run() error {
 		return err
 	}
 	defer s.Close()
-	fmt.Println("Thread:", s.Ref(), "model:", s.Model())
+	fmt.Println("Session:", s.Ref(), "model:", s.Model())
 	if err = s.Send(ctx, *prompt); err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func run() error {
 			return ctx.Err()
 		case e, ok := <-s.Events():
 			if !ok {
-				return fmt.Errorf("Codex disconnected")
+				return fmt.Errorf("Claude Code disconnected")
 			}
 			switch e.Kind {
 			case "text_delta":
@@ -97,9 +97,24 @@ func run() error {
 					return err
 				}
 			case "question_asked":
-				return fmt.Errorf("question received; use the web UI to answer it")
+				answers := map[string][]string{}
+				for _, q := range e.Prompt.Questions {
+					answer := "Hypercode spike answer"
+					if len(q.Options) > 0 {
+						answer = q.Options[0].Label
+					}
+					fmt.Printf("\nQuestion: %s -> %s\n", q.Question, answer)
+					answers[q.ID] = []string{answer}
+				}
+				if err = s.Respond(ctx, e.ID, adapter.Answer{Answers: answers}); err != nil {
+					return err
+				}
+			case "tool_started", "tool_done":
+				fmt.Printf("\n[%s] %s\n", e.Kind, e.Text)
+			case "status":
+				fmt.Printf("\n[status] %s %s\n", e.Status, e.Text)
 			case "error":
-				return fmt.Errorf("Codex: %s", e.Text)
+				return fmt.Errorf("Claude Code: %s", e.Text)
 			case "turn_done":
 				fmt.Printf("\nTurn: %s\n", e.Status)
 				if e.Status == "failed" {

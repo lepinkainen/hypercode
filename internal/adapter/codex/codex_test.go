@@ -51,13 +51,16 @@ func nextKind(t *testing.T, s adapter.Session, kind string) adapter.Event {
 }
 func TestLifecycle(t *testing.T) {
 	a := testAdapter(t)
-	s, err := a.Open(t.Context(), t.TempDir(), adapter.WorkspaceWrite)
+	s, err := a.Open(t.Context(), t.TempDir(), adapter.WorkspaceWrite, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
 	if s.Ref() != "fixture-thread" {
 		t.Fatalf("ref=%s", s.Ref())
+	}
+	if s.Model() != "fixture-large" {
+		t.Fatalf("effective model not reported: %q", s.Model())
 	}
 	if err = s.Send(t.Context(), "[approval]"); err != nil {
 		t.Fatal(err)
@@ -101,7 +104,7 @@ func TestLifecycle(t *testing.T) {
 	}
 	ref := s.Ref()
 	_ = s.Close()
-	resumed, err := a.Resume(t.Context(), t.TempDir(), ref, adapter.ReadOnly)
+	resumed, err := a.Resume(t.Context(), t.TempDir(), ref, adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +118,7 @@ func TestLifecycle(t *testing.T) {
 	nextKind(t, resumed, "turn_done")
 }
 func TestProcessLoss(t *testing.T) {
-	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +150,7 @@ func TestNotificationFixture(t *testing.T) {
 	}
 }
 func TestMissingExecutable(t *testing.T) {
-	_, err := (Adapter{Executable: "/nonexistent/codex"}).Open(context.Background(), t.TempDir(), adapter.ReadOnly)
+	_, err := (Adapter{Executable: "/nonexistent/codex"}).Open(context.Background(), t.TempDir(), adapter.ReadOnly, "")
 	if err == nil || !strings.Contains(err.Error(), "Install Codex") {
 		t.Fatalf("error=%v", err)
 	}
@@ -218,7 +221,7 @@ func TestResolvedServerRequestExpires(t *testing.T) {
 }
 
 func TestExplicitRPCRejection(t *testing.T) {
-	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +281,7 @@ func TestCloseWithInheritedPipe(t *testing.T) {
 			defer listener.Close()
 			a := testAdapter(t)
 			a.Args = []string{"-test.run=^TestInheritedPipeProcess$", "--", "pipe-parent", listener.Addr().String(), pipe}
-			s, err := a.Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+			s, err := a.Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -303,7 +306,7 @@ func TestCloseWithInheritedPipe(t *testing.T) {
 }
 
 func TestPlainTextStdoutIsNotFatal(t *testing.T) {
-	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,5 +367,27 @@ func TestNotificationToleratesShapeChanges(t *testing.T) {
 	}
 	if got[1].Kind != "turn_done" || got[1].Status != "failed" || got[1].Text != "quota exceeded" {
 		t.Fatalf("turn event=%+v", got[1])
+	}
+}
+func TestModels(t *testing.T) {
+	models, err := testAdapter(t).Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].ID != "fixture-large" || !models[0].Default || models[1].ID != "fixture-small" {
+		t.Fatalf("hidden models not filtered or order lost: %+v", models)
+	}
+}
+func TestModelParam(t *testing.T) {
+	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly, "fixture-small")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err = s.Send(t.Context(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if e := nextKind(t, s, "text_done"); !strings.Contains(e.Text, "model: fixture-small") {
+		t.Fatalf("model not passed to thread/start: %q", e.Text)
 	}
 }

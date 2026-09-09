@@ -36,6 +36,7 @@ type page struct {
 	Chat      *store.Chat
 	Directory string
 	Harnesses []string
+	Models    map[string][]adapter.Model
 }
 
 // itemView pairs an item with the harness of its chat so the template can label it.
@@ -56,7 +57,7 @@ type stream struct {
 }
 
 // harnessNames maps harness keys to display names; keys must match the SVG sprite ids in app.html.
-var harnessNames = map[string]string{"codex": "Codex", "claude": "Claude Code", "gemini": "Gemini CLI"}
+var harnessNames = map[string]string{"codex": "Codex", "claude": "Claude", "gemini": "Gemini CLI"}
 
 func New(m *session.Manager, dir string) (*Server, error) {
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
@@ -77,6 +78,7 @@ func New(m *session.Manager, dir string) (*Server, error) {
 			}
 			return s
 		},
+		"modelName": m.ModelName,
 		"harnessIcon": func(s string) string {
 			if _, ok := harnessNames[s]; ok {
 				return "h-" + s
@@ -179,14 +181,21 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, id, dir string) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(s.render(name, page{Chats: chats, Chat: chat, Directory: dir, Harnesses: s.manager.Harnesses()})))
+	_, _ = w.Write([]byte(s.render(name, page{Chats: chats, Chat: chat, Directory: dir, Harnesses: s.manager.Harnesses(), Models: s.models()})))
+}
+func (s *Server) models() map[string][]adapter.Model {
+	out := map[string][]adapter.Model{}
+	for _, h := range s.manager.Harnesses() {
+		out[h] = s.manager.Models(h)
+	}
+	return out
 }
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	harness := r.FormValue("harness")
 	if harness == "" {
 		harness = "codex"
 	}
-	id, err := s.manager.Create(r.Context(), harness, r.FormValue("directory"), adapter.PermissionMode(r.FormValue("mode")))
+	id, err := s.manager.Create(r.Context(), harness, r.FormValue("directory"), adapter.PermissionMode(r.FormValue("mode")), r.FormValue("model"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return

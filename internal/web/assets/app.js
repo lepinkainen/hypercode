@@ -144,7 +144,20 @@
       });
     }
   });
+  // The new-chat form renders one model select per agent. Only the chosen
+  // agent's select is visible and enabled, so only it is submitted. (Hiding
+  // <option> elements is not honored by WebKit, hence whole selects.)
+  const filterModels = () => {
+    const harness = document.querySelector("#harness");
+    if (!harness) return;
+    for (const select of document.querySelectorAll(".model-select")) {
+      const active = select.dataset.harness === harness.value;
+      select.hidden = !active;
+      select.disabled = !active;
+    }
+  };
   document.addEventListener("change", (event) => {
+    if (event.target.id === "harness") filterModels();
     if (event.target.matches("input[type=radio]")) {
       const text = event.target
         .closest("fieldset")
@@ -197,5 +210,9 @@
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) connect();
   });
-  document.addEventListener("DOMContentLoaded", connect);
+  document.addEventListener("htmx:after:swap", filterModels);
+  document.addEventListener("DOMContentLoaded", () => {
+    connect();
+    filterModels();
+  });
 })();

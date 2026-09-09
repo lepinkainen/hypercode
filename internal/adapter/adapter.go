@@ -22,13 +22,30 @@ func (p PermissionMode) Valid() bool {
 	return p == ReadOnly || p == WorkspaceWrite || p == FullAccess
 }
 
+// Model is one entry of a harness's selectable model catalog. An empty ID
+// means the harness's own default.
+type Model struct {
+	ID          string
+	Name        string
+	Description string
+	Default     bool
+}
+
 type Adapter interface {
-	Open(context.Context, string, PermissionMode) (Session, error)
-	Resume(context.Context, string, string, PermissionMode) (Session, error)
+	// Open starts a fresh native session in dir. An empty model keeps the
+	// harness default.
+	Open(ctx context.Context, dir string, mode PermissionMode, model string) (Session, error)
+	// Resume reattaches to a stored native session, cold if necessary.
+	Resume(ctx context.Context, dir, ref string, mode PermissionMode, model string) (Session, error)
+	// Models lists the catalog the installed CLI offers this account.
+	Models(context.Context) ([]Model, error)
 }
 
 type Session interface {
 	Ref() string
+	// Model is the native model id the session actually runs with, resolved
+	// from the harness default when Open received an empty model.
+	Model() string
 	Send(context.Context, string) error
 	Stop(context.Context) error
 	Respond(context.Context, string, Answer) error
