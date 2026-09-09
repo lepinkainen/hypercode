@@ -301,3 +301,68 @@ func TestCloseWithInheritedPipe(t *testing.T) {
 		})
 	}
 }
+
+func TestPlainTextStdoutIsNotFatal(t *testing.T) {
+	s, err := testAdapter(t).Open(t.Context(), t.TempDir(), adapter.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err = s.Send(t.Context(), "[noise]"); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for {
+		select {
+		case e, ok := <-s.Events():
+			if !ok {
+				t.Fatal("event stream closed")
+			}
+			kinds = append(kinds, e.Kind)
+			if e.Kind == "error" {
+				t.Fatalf("plain text on stdout was treated as fatal: %q", e.Text)
+			}
+			if e.Kind == "status" && !strings.Contains(e.Text, "npm WARN fixture") {
+				t.Fatalf("status text=%q", e.Text)
+			}
+			if e.Kind == "turn_done" {
+				if !strings.Contains(strings.Join(kinds, ","), "status") {
+					t.Fatalf("no notice about ignored output: %v", kinds)
+				}
+				return
+			}
+		case <-t.Context().Done():
+			t.Fatal("test canceled")
+		}
+	}
+}
+func TestNotificationToleratesShapeChanges(t *testing.T) {
+	s := &session{ref: "recorded-thread", events: make(chan adapter.Event, 32), closing: make(chan struct{}), requests: map[string]pendingRequest{}}
+	lines := []string{
+		// item.command as argv array instead of a string.
+		`{"method":"item/completed","params":{"threadId":"recorded-thread","item":{"id":"c1","type":"commandExecution","command":["git","status"],"aggregatedOutput":"clean","status":"completed"}}}`,
+		// turn.error as a bare string instead of an object.
+		`{"method":"turn/completed","params":{"threadId":"recorded-thread","turn":{"id":"1","status":"failed","error":"quota exceeded"}}}`,
+	}
+	for _, line := range lines {
+		var p packet
+		if err := json.Unmarshal([]byte(line), &p); err != nil {
+			t.Fatal(err)
+		}
+		s.notification(p)
+	}
+	close(s.events)
+	var got []adapter.Event
+	for e := range s.events {
+		got = append(got, e)
+	}
+	if len(got) != 2 {
+		t.Fatalf("events=%+v", got)
+	}
+	if got[0].Kind != "tool_done" || !strings.HasPrefix(got[0].Text, "git status") {
+		t.Fatalf("tool event=%+v", got[0])
+	}
+	if got[1].Kind != "turn_done" || got[1].Status != "failed" || got[1].Text != "quota exceeded" {
+		t.Fatalf("turn event=%+v", got[1])
+	}
+}

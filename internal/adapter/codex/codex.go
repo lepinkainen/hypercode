@@ -3,11 +3,13 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -274,10 +276,21 @@ func (s *session) read(stdout io.Reader) {
 	scan := bufio.NewScanner(stdout)
 	scan.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scan.Scan() {
-		s.record("received", json.RawMessage(scan.Bytes()))
+		line := bytes.TrimSpace(scan.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		s.record("received", json.RawMessage(line))
 		var p packet
-		if err := json.Unmarshal(scan.Bytes(), &p); err != nil {
-			s.emit(adapter.Event{Kind: "error", Text: "Invalid Codex protocol message: " + err.Error()})
+		if err := json.Unmarshal(line, &p); err != nil {
+			// Wrapper scripts and shims print plain text on stdout. The process
+			// is still healthy, so surface the line without ending the turn.
+			text := string(line)
+			if len(text) > 200 {
+				text = text[:200] + "…"
+			}
+			slog.Warn("ignoring non-protocol Codex output", "line", text, "error", err)
+			s.emit(adapter.Event{Kind: "status", Text: "Ignored non-protocol output from Codex: " + text})
 			continue
 		}
 		if p.Method == "" {
@@ -377,27 +390,30 @@ func (s *session) notification(p packet) {
 		RequestID json.RawMessage `json:"requestId"`
 		Delta     string          `json:"delta"`
 		Item      struct {
-			ID      string `json:"id"`
-			Type    string `json:"type"`
-			Text    string `json:"text"`
-			Command string `json:"command"`
-			Output  string `json:"aggregatedOutput"`
-			Status  string `json:"status"`
+			ID      string          `json:"id"`
+			Type    string          `json:"type"`
+			Text    string          `json:"text"`
+			Command json.RawMessage `json:"command"`
+			Output  string          `json:"aggregatedOutput"`
+			Status  string          `json:"status"`
 		} `json:"item"`
 		Turn struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
-			Error  *struct {
-				Message string `json:"message"`
-			} `json:"error"`
+			ID     string          `json:"id"`
+			Status string          `json:"status"`
+			Error  json.RawMessage `json:"error"`
 		} `json:"turn"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-		WillRetry bool `json:"willRetry"`
+		Error     json.RawMessage `json:"error"`
+		WillRetry bool            `json:"willRetry"`
 	}
-	if json.Unmarshal(p.Params, &v) != nil {
-		return
+	if err := json.Unmarshal(p.Params, &v); err != nil {
+		// A type mismatch still fills every other field. Dropping the whole
+		// notification would lose turn/completed and leave the chat running.
+		var mismatch *json.UnmarshalTypeError
+		if !errors.As(err, &mismatch) {
+			slog.Warn("ignoring undecodable Codex notification", "method", p.Method, "error", err)
+			return
+		}
+		slog.Warn("Codex notification field has unexpected shape", "method", p.Method, "field", mismatch.Field, "error", err)
 	}
 	ref := s.Ref()
 	if v.ThreadID != "" && ref != "" && v.ThreadID != ref {
@@ -429,7 +445,7 @@ func (s *session) notification(p packet) {
 			}
 			return
 		}
-		text := v.Item.Command
+		text := looseText(v.Item.Command)
 		if text == "" {
 			text = v.Item.Type
 		}
@@ -454,16 +470,35 @@ func (s *session) notification(p packet) {
 		s.turn = ""
 		clear(s.requests)
 		s.mu.Unlock()
-		text := ""
-		if v.Turn.Error != nil {
-			text = v.Turn.Error.Message
-		}
-		s.emit(adapter.Event{Kind: "turn_done", Status: v.Turn.Status, Text: text})
+		s.emit(adapter.Event{Kind: "turn_done", Status: v.Turn.Status, Text: looseText(v.Turn.Error)})
 	case "error":
 		kind := "error"
 		if v.WillRetry {
 			kind = "status"
 		}
-		s.emit(adapter.Event{Kind: kind, Text: v.Error.Message})
+		s.emit(adapter.Event{Kind: kind, Text: looseText(v.Error)})
 	}
+}
+
+// looseText reads a field whose shape varies across Codex versions: a string,
+// an argv array, an object with a message, or nothing.
+func looseText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return str
+	}
+	var argv []string
+	if json.Unmarshal(raw, &argv) == nil {
+		return strings.Join(argv, " ")
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &obj) == nil && obj.Message != "" {
+		return obj.Message
+	}
+	return string(raw)
 }

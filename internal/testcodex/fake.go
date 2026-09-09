@@ -74,6 +74,11 @@ func Run(in io.Reader, out io.Writer) error {
 			switch {
 			case strings.Contains(text, "[crash]"):
 				return nil
+			case strings.Contains(text, "[noise]"):
+				// A wrapper script or shim writing plain text to stdout mid-turn.
+				_, _ = fmt.Fprintln(out)
+				_, _ = fmt.Fprintln(out, "npm WARN fixture: plain text on stdout")
+				finish("Survived stdout noise.", "completed")
 			case strings.Contains(text, "[approval]"):
 				waiting = "approval"
 				event("item/agentMessage/delta", map[string]any{"threadId": ref, "itemId": item, "delta": "I have inspected the project. Waiting for your approval."})
