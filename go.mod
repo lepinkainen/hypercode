@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/yuin/goldmark v1.7.13
-	golang.org/x/image v0.36.0
+	golang.org/x/image v0.41.0
 	modernc.org/sqlite v1.38.2
 )
 
